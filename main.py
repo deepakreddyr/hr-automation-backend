@@ -22,66 +22,169 @@ from aiparser import shortlist_candidates,scrape,get_candidate_details,get_quest
 from supabase import create_client, Client
 import threading
 import ast
+import secrets
+
 # ─── App & Config ─────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
-CORS(app, supports_credentials=True, origins=["https://hr-automation-frontend-tawny.vercel.app"])
-app.secret_key = 'your_super_secret_key_here' 
-app.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",  
-    SESSION_COOKIE_SECURE=False,   
+load_dotenv()
+
+# Environment detection
+IS_PRODUCTION = os.getenv("FLASK_ENV") == "production" or os.getenv("ENVIRONMENT") == "production"
+
+# Production and Development Origins
+DEVELOPMENT_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8080"
+]
+
+PRODUCTION_ORIGINS = [
+    os.getenv("FRONTEND_URL", "https://yourdomain.com"),  # Your production frontend URL
+    # Add any additional production domains
+]
+
+# CORS Configuration
+CORS(
+    app,
+    supports_credentials=True,
+    origins=PRODUCTION_ORIGINS if IS_PRODUCTION else DEVELOPMENT_ORIGINS,
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 )
 
-# ─── In‑Memory User Store (swap out for DB in production) ─────────────────────
-load_dotenv()
+# Generate a secure secret key for production
+if IS_PRODUCTION:
+    app.secret_key = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
+    if not os.getenv("SECRET_KEY"):
+        print("WARNING: SECRET_KEY not set in environment variables!")
+else:
+    app.secret_key = 'your_super_secret_key_here'
+
+# Session Configuration
+if IS_PRODUCTION:
+    app.config.update(
+        SESSION_COOKIE_SAMESITE="None",    # Required for cross-origin in production
+        SESSION_COOKIE_SECURE=True,        # HTTPS only in production
+        SESSION_COOKIE_HTTPONLY=True,      # Security
+        SESSION_COOKIE_NAME="session",
+        PERMANENT_SESSION_LIFETIME=3600,
+        SESSION_COOKIE_DOMAIN=os.getenv("COOKIE_DOMAIN"),  # e.g., ".yourdomain.com"
+    )
+else:
+    # Development configuration
+    app.config.update(
+        SESSION_COOKIE_SAMESITE="Lax",     # Lax for localhost
+        SESSION_COOKIE_SECURE=False,       # HTTP allowed in development
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_NAME="session",
+        PERMANENT_SESSION_LIFETIME=3600
+    )
+
+# ─── Environment Variables ─────────────────────────────────────────────────────
 
 VAPI_URL               = os.getenv("VAPI_URL")
 VAPI_API_KEY           = os.getenv("VAPI_API_KEY")
 AGENT_ID               = os.getenv("AGENT_ID")
 VAPI_PHONE_NUMBER_ID   = os.getenv("VAPI_PHONE_NUMBER_ID")
+
 url: str = os.getenv("SUPABASE_URL")
-key: str = os.getenv("SUPABASE_KEY")
+anon_key: str = os.getenv("SUPABASE_KEY")
+service_key: str = os.getenv("SERVICE_ROLE_KEY")
 
-supabase: Client = create_client(url, key)
+# Validate required environment variables
+required_vars = ["SUPABASE_URL", "SUPABASE_KEY"]
+for var in required_vars:
+    if not os.getenv(var):
+        raise ValueError(f"Required environment variable {var} is not set")
 
-# ------------------------------
-# Login
-# ------------------------------
-@app.route("/login", methods=["GET", "POST"])
+supabase: Client = create_client(url, anon_key)
+
+# ─── Helper Functions ─────────────────────────────────────────────────────────
+
+def debug_session():
+    """Helper function to debug session state - only in development"""
+    if not IS_PRODUCTION:
+        print(f"Session data: {dict(session)}")
+        print(f"Session keys: {list(session.keys())}")
+        print(f"Has user: {'user' in session}")
+        print(f"Has user_id: {'user_id' in session}")
+
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for deployment monitoring"""
+    return jsonify({"status": "healthy", "environment": "production" if IS_PRODUCTION else "development"})
+
+@app.route("/login", methods=["GET","POST"])
 def login():
-    if request.method == "GET":
-        if session.get("user"):
-            return redirect("http://localhost:3000/dashboard")
-        return render_template("login.html")
-
-    email = request.form.get("email", "").lower()
-    pw = request.form.get("password", "")
-
     try:
-        auth_response = supabase.auth.sign_in_with_password({"email": email, "password": pw})
-        email = supabase.table('users').select('email').eq('email', email).execute().data[0]['email']
-
-        if email:
-            session["user"] = email
-            user_id = supabase.table("users").select("id").eq('email', session['user']).execute()
-            session["user_id"] = user_id.data[0]["id"]
-            print(session)
-            return jsonify({"success": True, "message": "Login successful"})
+        # Handle both form data and JSON data
+        if request.is_json:
+            data = request.get_json()
+            email = data.get("email", "").lower()
+            password = data.get("password", "")
         else:
-            return jsonify({"success": False, "message": "Invalid credentials"}), 401
+            email = request.form.get("email", "").lower()
+            password = request.form.get("password", "")
+
+        if not email or not password:
+            return jsonify({"success": False, "message": "Email and password required"}), 400
+
+        # Authenticate with Supabase
+        auth_response = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+
+        # Check if authentication failed
+        if not auth_response or not auth_response.user:
+            return jsonify({"success": False, "message": "Invalid email or password"}), 401
+
+        # Fetch user record from DB
+        user_data = supabase.table("users").select("id, email").eq("email", email).execute()
+        if not user_data.data:
+            return jsonify({"success": False, "message": "User not found in database"}), 404
+
+        # Store session data
+        session.permanent = True
+        session["user"] = user_data.data[0]["email"]
+        session["user_id"] = user_data.data[0]["id"]
+        
+        # Debug only in development
+        if not IS_PRODUCTION:
+            print("After login - Session set:")
+            debug_session()
+        
+        return jsonify({"success": True, "message": "Login successful"})
 
     except Exception as e:
-        return jsonify({"success": False, "message": f"Login failed: {str(e)}"}), 500
+        # Log error (use proper logging in production)
+        if IS_PRODUCTION:
+            # Use proper logging service
+            app.logger.error(f"Login error: {str(e)}")
+        else:
+            print(f"Login error: {str(e)}")
+        return jsonify({"success": False, "message": "Login failed"}), 500
 
 
-# ------------------------------
-# Logout
-# ------------------------------
+# Add a session check endpoint for debugging
+@app.route("/api/session-check", methods=["GET"])
+def session_check():
+    debug_session()
+    return jsonify({
+        "has_session": "user" in session and "user_id" in session,
+        "user": session.get("user"),
+        "user_id": session.get("user_id"),
+        "session_keys": list(session.keys())
+    })
 
-@app.route("/logout")
+@app.route("/logout", methods=["GET", "POST"])
 def logout():
     session.clear()
-    return jsonify({"success": True, "message": "Logged out"})
+    return jsonify({"success": True, "message": "Logged out successfully"})
 
 
 
@@ -882,34 +985,35 @@ def api_transcript(candidate_id):
         print("Transcript API error:", e)
         return jsonify({"error": "Could not fetch transcript"}), 500
 
-
-
-# ------ Dashboard -------------------------------
 @app.route("/api/dashboard", methods=["GET"])
 def dashboard():
-    if "user" not in session:
-        return jsonify({"error": "Unauthorized"}), 401
+    # Debug session before checking
+    print("Dashboard endpoint - Session check:")
+    debug_session()
+    
+    if "user" not in session or "user_id" not in session:
+        print("Unauthorized access attempt - no session data")
+        return jsonify({"error": "Unauthorized - Please login again"}), 401
 
     try:
-        user_id = session.get("user_id")
-        if not user_id:
-            user_data = supabase.table("users").select("id").eq('email', session["user"]).execute()
-            user_id = user_data.data[0]["id"]
-            session["user_id"] = user_id
+        user_id = session["user_id"]
+        print(f"Dashboard access granted for user_id: {user_id}")
 
-        return jsonify({
-        "todays_searches": get_todays_searches(user_id),
-        "todays_candidates": get_todays_candidates(user_id),
-        "new_joinees": get_new_joinees(user_id),
-        "creds_used": get_creds_used(user_id),
-        "user_name": get_user_name(user_id),
-        "people_called": get_people_called(user_id),
-        "weekly_activity": get_weekly_activity(user_id)
-        })
-
+        dashboard_data = {
+            "todays_searches": get_todays_searches(user_id),
+            "todays_candidates": get_todays_candidates(user_id),
+            "new_joinees": get_new_joinees(user_id),
+            "creds_used": get_creds_used(user_id),
+            "user_name": get_user_name(user_id),
+            "people_called": get_people_called(user_id),
+            "weekly_activity": get_weekly_activity(user_id)
+        }
+        
+        return jsonify(dashboard_data)
+        
     except Exception as e:
+        print(f"Dashboard error: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
 
 # ------ to fetch and render search table data in frontend -------------------------------
 
@@ -1121,7 +1225,19 @@ def deduct_credits(user_id, action_type, reference_id=None):
         "reference_id": reference_id
     }).execute()
 
-# ─── Run App ─────────────────────────────────────────────────────────────────
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    if IS_PRODUCTION:
+        # Production server configuration
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
+    else:
+        # Development server configuration
+        app.run(debug=True, host="127.0.0.1", port=5000)
