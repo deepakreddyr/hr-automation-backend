@@ -42,7 +42,8 @@ DEVELOPMENT_ORIGINS = [
 
 PRODUCTION_ORIGINS = [
     os.getenv("FRONTEND_URL", "https://yourdomain.com"),  # Your production frontend URL
-    # Add any additional production domains
+    "http://localhost:8080",
+    "http://127.0.0.1:8080"
 ]
 
 # CORS Configuration
