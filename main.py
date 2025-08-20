@@ -41,7 +41,9 @@ DEVELOPMENT_ORIGINS = [
 ]
 
 PRODUCTION_ORIGINS = [
-    os.getenv("FRONTEND_URL", "https://yourdomain.com"),  # Your production frontend URL
+    os.getenv("FRONTEND_URL", "https://yourdomain.com"),
+    "https://hr-frontend-one.vercel.app",
+    "https://hr-frontend-x9j2.onrender.com",
     "http://localhost:8080",
     "http://127.0.0.1:8080"
 ]
