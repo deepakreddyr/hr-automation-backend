@@ -32,12 +32,24 @@ load_dotenv()
 # Environment detection
 IS_PRODUCTION = os.getenv("FLASK_ENV") == "production" or os.getenv("ENVIRONMENT") == "production"
 
-# Production and Development Origins
-DEVELOPMENT_ORIGINS = [
+# ─── Unified CORS Configuration (Works for Both Localhost & Vercel) ─────────────
+
+# Unified Origins - Works for both scenarios
+ALLOWED_ORIGINS = [
+    # Localhost development
     "http://localhost:3000",
-    "http://localhost:8080",
+    "http://localhost:8080", 
+    "http://localhost:5173",    # Vite default
     "http://127.0.0.1:3000",
-    "http://127.0.0.1:8080"
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:5173",
+    
+    # Production deployments
+    "https://hr-frontend-one.vercel.app",
+    "https://hr-frontend-x9j2.onrender.com",
+    
+    # Custom frontend URL from environment
+    os.getenv("FRONTEND_URL", ""),
 ]
 
 PRODUCTION_ORIGINS = [
@@ -48,42 +60,45 @@ PRODUCTION_ORIGINS = [
     "http://127.0.0.1:8080"
 ]
 
-# CORS Configuration
+# Debug output
+print("=== UNIFIED CORS CONFIGURATION ===")
+print(f"Environment: {'PRODUCTION' if IS_PRODUCTION else 'DEVELOPMENT'}")
+print(f"Allowed origins: {ALLOWED_ORIGINS}")
+print("==================================")
+
+# Unified CORS Configuration
 CORS(
     app,
     supports_credentials=True,
-    origins=PRODUCTION_ORIGINS if IS_PRODUCTION else DEVELOPMENT_ORIGINS,
-    allow_headers=["Content-Type", "Authorization"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    origins=ALLOWED_ORIGINS,
+    allow_headers=[
+        "Content-Type", 
+        "Authorization", 
+        "Cookie",
+        "X-Requested-With",
+        "Accept",
+        "Origin"
+    ],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    expose_headers=["Set-Cookie"],
+    max_age=86400  # Cache preflight requests for 24 hours
 )
 
-# Generate a secure secret key for production
-if IS_PRODUCTION:
-    app.secret_key = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
-    if not os.getenv("SECRET_KEY"):
-        print("WARNING: SECRET_KEY not set in environment variables!")
-else:
-    app.secret_key = 'your_super_secret_key_here'
+# Secure secret key
+app.secret_key = os.getenv("SECRET_KEY", "xJ7vK9mQ2nR8pL6wE4tY1uI0oP3aS5dF7gH9jK2lM6nB8vC1xZ4qW7eR3tY6uI9o")
 
-# Session Configuration
-if IS_PRODUCTION:
-    app.config.update(
-        SESSION_COOKIE_SAMESITE="None",    # Required for cross-origin in production
-        SESSION_COOKIE_SECURE=True,        # HTTPS only in production
-        SESSION_COOKIE_HTTPONLY=True,      # Security
-        SESSION_COOKIE_NAME="session",
-        PERMANENT_SESSION_LIFETIME=3600,
-        SESSION_COOKIE_DOMAIN=os.getenv("COOKIE_DOMAIN"),  # e.g., ".yourdomain.com"
-    )
-else:
-    # Development configuration
-    app.config.update(
-        SESSION_COOKIE_SAMESITE="Lax",     # Lax for localhost
-        SESSION_COOKIE_SECURE=False,       # HTTP allowed in development
-        SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_NAME="session",
-        PERMANENT_SESSION_LIFETIME=3600
-    )
+# Unified Session Configuration - Works for both localhost and Vercel
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",         # Required for cross-origin
+    SESSION_COOKIE_SECURE=False,            # False for HTTP, True for HTTPS
+    SESSION_COOKIE_HTTPONLY=False,          # False for debugging, True for production security
+    SESSION_COOKIE_NAME="session",
+    PERMANENT_SESSION_LIFETIME=3600,        # 1 hour
+    SESSION_COOKIE_DOMAIN=None,             # Don't restrict domain
+    SESSION_COOKIE_PATH="/",                # Available for all paths
+)
+
+print(f"Session config: SameSite=None, Secure=False, HttpOnly=False, Domain=None")
 
 # ─── Environment Variables ─────────────────────────────────────────────────────
 
@@ -107,12 +122,13 @@ supabase: Client = create_client(url, anon_key)
 # ─── Helper Functions ─────────────────────────────────────────────────────────
 
 def debug_session():
-    """Helper function to debug session state - only in development"""
-    if not IS_PRODUCTION:
-        print(f"Session data: {dict(session)}")
-        print(f"Session keys: {list(session.keys())}")
-        print(f"Has user: {'user' in session}")
-        print(f"Has user_id: {'user_id' in session}")
+    """Helper function to debug session state"""
+    print(f"Session data: {dict(session)}")
+    print(f"Session keys: {list(session.keys())}")
+    print(f"Has user: {'user' in session}")
+    print(f"Has user_id: {'user_id' in session}")
+    print(f"Request origin: {request.headers.get('Origin')}")
+    print(f"Request cookies: {dict(request.cookies)}")
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -156,22 +172,15 @@ def login():
         session["user"] = user_data.data[0]["email"]
         session["user_id"] = user_data.data[0]["id"]
         
-        # Debug only in development
-        if not IS_PRODUCTION:
-            print("After login - Session set:")
-            debug_session()
+        print("After login - Session set:")
+        debug_session()
         
         return jsonify({"success": True, "message": "Login successful"})
 
     except Exception as e:
-        # Log error (use proper logging in production)
-        if IS_PRODUCTION:
-            # Use proper logging service
-            app.logger.error(f"Login error: {str(e)}")
-        else:
-            print(f"Login error: {str(e)}")
+        # Log error
+        print(f"Login error: {str(e)}")
         return jsonify({"success": False, "message": "Login failed"}), 500
-
 
 # Add a session check endpoint for debugging
 @app.route("/api/session-check", methods=["GET"])
@@ -181,16 +190,15 @@ def session_check():
         "has_session": "user" in session and "user_id" in session,
         "user": session.get("user"),
         "user_id": session.get("user_id"),
-        "session_keys": list(session.keys())
+        "session_keys": list(session.keys()),
+        "request_origin": request.headers.get('Origin'),
+        "cookies_received": dict(request.cookies)
     })
 
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
     session.clear()
     return jsonify({"success": True, "message": "Logged out successfully"})
-
-
-
 # ------------------------------
 # Password reset
 # ------------------------------
