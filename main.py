@@ -4,7 +4,7 @@ from functools import wraps
 import json
 from flask import (
     Flask, render_template, request,
-    redirect, url_for, session, jsonify, flash
+    redirect, url_for, session, jsonify, flash, make_response
 )
 from dashboard_data import (
     get_todays_searches,
@@ -74,7 +74,6 @@ CORS(
     allow_headers=[
         "Content-Type", 
         "Authorization", 
-        "Cookie",
         "X-Requested-With",
         "Accept",
         "Origin"
@@ -89,11 +88,11 @@ app.secret_key = os.getenv("SECRET_KEY", "xJ7vK9mQ2nR8pL6wE4tY1uI0oP3aS5dF7gH9jK
 
 # Unified Session Configuration - Works for both localhost and Vercel
 app.config.update(
-    SESSION_COOKIE_SAMESITE="None",         # Required for cross-origin
-    SESSION_COOKIE_SECURE=False,            # False for HTTP, True for HTTPS
-    SESSION_COOKIE_HTTPONLY=False,          # False for debugging, True for production security
     SESSION_COOKIE_NAME="session",
-    PERMANENT_SESSION_LIFETIME=3600,        # 1 hour
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,   # Must be HTTPS in production
+    SESSION_COOKIE_SAMESITE="None",  # Required for cross-site cookies
+    PERMANENT_SESSION_LIFETIME=86400,
     SESSION_COOKIE_DOMAIN=None,             # Don't restrict domain
     SESSION_COOKIE_PATH="/",                # Available for all paths
 )
@@ -175,7 +174,8 @@ def login():
         print("After login - Session set:")
         debug_session()
         
-        return jsonify({"success": True, "message": "Login successful"})
+        response = make_response(jsonify({"success": True, "message": "Login successful"}))
+        return response
 
     except Exception as e:
         # Log error
@@ -1020,7 +1020,7 @@ def dashboard():
             "weekly_activity": get_weekly_activity(user_id)
         }
         
-        return jsonify(dashboard_data)
+        return make_response(jsonify(dashboard_data))
         
     except Exception as e:
         print(f"Dashboard error: {str(e)}")
