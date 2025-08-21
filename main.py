@@ -89,7 +89,7 @@ app.secret_key = os.getenv("SECRET_KEY", "xJ7vK9mQ2nR8pL6wE4tY1uI0oP3aS5dF7gH9jK
 
 # Unified Session Configuration - Works for both localhost and Vercel
 app.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",         # Required for cross-origin
+    SESSION_COOKIE_SAMESITE="None",         # Required for cross-origin
     SESSION_COOKIE_SECURE=False,            # False for HTTP, True for HTTPS
     SESSION_COOKIE_HTTPONLY=False,          # False for debugging, True for production security
     SESSION_COOKIE_NAME="session",
