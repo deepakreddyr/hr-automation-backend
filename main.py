@@ -90,8 +90,8 @@ app.secret_key = os.getenv("SECRET_KEY", "xJ7vK9mQ2nR8pL6wE4tY1uI0oP3aS5dF7gH9jK
 app.config.update(
     SESSION_COOKIE_NAME="session",
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=True,   # Must be HTTPS in production
-    SESSION_COOKIE_SAMESITE="None",  # Required for cross-site cookies
+    SESSION_COOKIE_SECURE=False,   # Must be HTTPS in production
+    SESSION_COOKIE_SAMESITE="Lax",  # Required for cross-site cookies
     PERMANENT_SESSION_LIFETIME=86400,
     SESSION_COOKIE_DOMAIN=None,             # Don't restrict domain
     SESSION_COOKIE_PATH="/",                # Available for all paths
