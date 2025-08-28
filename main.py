@@ -2,9 +2,11 @@ import os
 from dotenv import load_dotenv
 from functools import wraps
 import json
+import jwt
+from datetime import datetime, timedelta, timezone
 from flask import (
     Flask, render_template, request,
-    redirect, url_for, session, jsonify, flash, make_response
+    redirect, url_for, jsonify, flash, make_response
 )
 from dashboard_data import (
     get_todays_searches,
@@ -31,6 +33,14 @@ load_dotenv()
 
 # Environment detection
 IS_PRODUCTION = os.getenv("FLASK_ENV") == "production" or os.getenv("ENVIRONMENT") == "production"
+
+# ─── JWT Configuration ─────────────────────────────────────────────────────
+
+# JWT Secret Key - Use a strong secret key
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)  # Access token expires in 24 hours
+JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)  # Refresh token expires in 30 days
 
 # ─── Unified CORS Configuration (Works for Both Localhost & Vercel) ─────────────
 
@@ -83,21 +93,10 @@ CORS(
     max_age=86400  # Cache preflight requests for 24 hours
 )
 
-# Secure secret key
+# Secure secret key (still needed for Flask operations)
 app.secret_key = os.getenv("SECRET_KEY", "xJ7vK9mQ2nR8pL6wE4tY1uI0oP3aS5dF7gH9jK2lM6nB8vC1xZ4qW7eR3tY6uI9o")
 
-# Unified Session Configuration - Works for both localhost and Vercel
-app.config.update(
-    SESSION_COOKIE_NAME="session",
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=False,   # Must be HTTPS in production
-    SESSION_COOKIE_SAMESITE="Lax",  # Required for cross-site cookies
-    PERMANENT_SESSION_LIFETIME=86400,
-    SESSION_COOKIE_DOMAIN=None,             # Don't restrict domain
-    SESSION_COOKIE_PATH="/",                # Available for all paths
-)
-
-print(f"Session config: SameSite=None, Secure=False, HttpOnly=False, Domain=None")
+print(f"JWT Authentication configured with {JWT_ACCESS_TOKEN_EXPIRES} access token expiry")
 
 # ─── Environment Variables ─────────────────────────────────────────────────────
 
@@ -118,16 +117,69 @@ for var in required_vars:
 
 supabase: Client = create_client(url, anon_key)
 
-# ─── Helper Functions ─────────────────────────────────────────────────────────
+# ─── JWT Helper Functions ─────────────────────────────────────────────────────
 
-def debug_session():
-    """Helper function to debug session state"""
-    print(f"Session data: {dict(session)}")
-    print(f"Session keys: {list(session.keys())}")
-    print(f"Has user: {'user' in session}")
-    print(f"Has user_id: {'user_id' in session}")
-    print(f"Request origin: {request.headers.get('Origin')}")
-    print(f"Request cookies: {dict(request.cookies)}")
+def generate_access_token(user_id, email):
+    """Generate JWT access token"""
+    payload = {
+        'user_id': str(user_id),  # Ensure user_id is a string
+        'email': str(email),      # Ensure email is a string
+        'exp': datetime.now(timezone.utc) + JWT_ACCESS_TOKEN_EXPIRES,
+        'iat': datetime.now(timezone.utc),
+        'type': 'access'
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+def generate_refresh_token(user_id, email):
+    """Generate JWT refresh token"""
+    payload = {
+        'user_id': str(user_id),  # Ensure user_id is a string
+        'email': str(email),      # Ensure email is a string
+        'exp': datetime.now(timezone.utc) + JWT_REFRESH_TOKEN_EXPIRES,
+        'iat': datetime.now(timezone.utc),
+        'type': 'refresh'
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+def decode_token(token):
+    """Decode and validate JWT token"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return {"error": "Token has expired"}
+    except jwt.InvalidTokenError:
+        return {"error": "Invalid token"}
+
+def get_token_from_header():
+    """Extract JWT token from Authorization header"""
+    auth_header = request.headers.get('Authorization')
+    if auth_header:
+        try:
+            # Expected format: "Bearer <token>"
+            token = auth_header.split(' ')[1]
+            return token
+        except IndexError:
+            return None
+    return None
+
+def get_current_user():
+    """Get current user from JWT token"""
+    token = get_token_from_header()
+    if not token:
+        return None
+    
+    payload = decode_token(token)
+    if 'error' in payload:
+        return None
+    
+    if payload.get('type') != 'access':
+        return None
+    
+    return {
+        'user_id': payload.get('user_id'),
+        'email': payload.get('email')
+    }
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -166,39 +218,86 @@ def login():
         if not user_data.data:
             return jsonify({"success": False, "message": "User not found in database"}), 404
 
-        # Store session data
-        session.permanent = True
-        session["user"] = user_data.data[0]["email"]
-        session["user_id"] = user_data.data[0]["id"]
+        user_id = user_data.data[0]["id"]
+        user_email = user_data.data[0]["email"]
+
+        # Ensure user_id and email are strings and add debug logging
+        user_id_str = str(user_id)
+        user_email_str = str(user_email)
         
-        print("After login - Session set:")
-        debug_session()
+        print(f"Creating JWT tokens for user_id: {user_id_str} ({type(user_id)}), email: {user_email_str}")
+
+        # Generate JWT tokens
+        access_token = generate_access_token(user_id_str, user_email_str)
+        refresh_token = generate_refresh_token(user_id_str, user_email_str)
         
-        response = make_response(jsonify({"success": True, "message": "Login successful"}))
-        return response
+        print(f"JWT tokens generated for user: {user_email}")
+        
+        return jsonify({
+            "success": True, 
+            "message": "Login successful",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user": {
+                "id": user_id_str,
+                "email": user_email_str
+            }
+        })
 
     except Exception as e:
         # Log error
         print(f"Login error: {str(e)}")
         return jsonify({"success": False, "message": "Login failed"}), 500
 
-# Add a session check endpoint for debugging
-@app.route("/api/session-check", methods=["GET"])
-def session_check():
-    debug_session()
+@app.route("/refresh", methods=["POST"])
+def refresh_token():
+    """Refresh JWT access token using refresh token"""
+    try:
+        data = request.get_json()
+        refresh_token = data.get("refresh_token")
+        
+        if not refresh_token:
+            return jsonify({"success": False, "message": "Refresh token required"}), 400
+        
+        # Decode refresh token
+        payload = decode_token(refresh_token)
+        if 'error' in payload:
+            return jsonify({"success": False, "message": payload['error']}), 401
+        
+        if payload.get('type') != 'refresh':
+            return jsonify({"success": False, "message": "Invalid token type"}), 401
+        
+        # Generate new access token
+        new_access_token = generate_access_token(payload['user_id'], payload['email'])
+        
+        return jsonify({
+            "success": True,
+            "access_token": new_access_token
+        })
+        
+    except Exception as e:
+        print(f"Refresh token error: {str(e)}")
+        return jsonify({"success": False, "message": "Token refresh failed"}), 500
+
+@app.route("/api/user-info", methods=["GET"])
+def get_user_info():
+    """Get current user information from JWT token"""
+    user = get_current_user()
+    if not user:
+        return jsonify({"success": False, "message": "Authentication required"}), 401
+    
     return jsonify({
-        "has_session": "user" in session and "user_id" in session,
-        "user": session.get("user"),
-        "user_id": session.get("user_id"),
-        "session_keys": list(session.keys()),
-        "request_origin": request.headers.get('Origin'),
-        "cookies_received": dict(request.cookies)
+        "success": True,
+        "user": user
     })
 
 @app.route("/logout", methods=["GET", "POST"])
 def logout():
-    session.clear()
+    """Logout endpoint (client-side token removal)"""
+    # With JWT, logout is primarily handled client-side by removing tokens
+    # You could implement a token blacklist here if needed
     return jsonify({"success": True, "message": "Logged out successfully"})
+
 # ------------------------------
 # Password reset
 # ------------------------------
@@ -220,63 +319,105 @@ TRANSCRIPT={}
 def error():
     return render_template("404.html")
 
-# ─── Utility: Login Required Decorator ────────────────────────────────────────
+# ─── Utility: JWT Authentication Decorator ────────────────────────────────────
 
-def login_required(f):
+def jwt_required(f):
+    """JWT authentication decorator"""
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get("user"):
+        user = get_current_user()
+        if not user:
+            # For API endpoints, return JSON error
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({"success": False, "message": "Authentication required"}), 401
+            # For web pages, redirect to login
             return redirect(url_for("login"))
+        
+        # Add user info to request context
+        request.current_user = user
         return f(*args, **kwargs)
     return decorated
 
+def optional_jwt(f):
+    """Optional JWT authentication decorator - doesn't fail if no token"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = get_current_user()
+        request.current_user = user  # Will be None if not authenticated
+        return f(*args, **kwargs)
+    return decorated
 
 @app.route('/api/search-status/<int:search_id>')
-@login_required
+@jwt_required
 def get_search_status(search_id):
     response = supabase.table("search").select("status").eq("id", search_id).single().execute()
+    print(response)
     if response.data:
         return jsonify({"status": response.data.get("status")})
     else:
         return jsonify({"error": "Search not found"}), 404
 
-
 @app.route("/api/create-search", methods=["POST"])
-@login_required
+@jwt_required
 def create_search():
-    response = supabase.table("search").insert({
-        "user_id": session["user_id"],
-        "processed": False,
-        "remote_work": False,
-        "contract_hiring": False,
-        "key_skills": "",
-        "job_role": "",
-        "raw_data": "",
-        "shortlisted_index": "[]",
-        "noc": 0,
-        "job_description": "",
-        "status":"shortlist"
-    }).execute()
+    """Create a new search with JWT authentication"""
+    try:
+        # Get user info from JWT token
+        user = request.current_user
+        user_id = user['user_id']
+        
+        print(f"Creating search for user_id: {user_id}")
+        
+        # Create search record
+        response = supabase.table("search").insert({
+            "user_id": user_id,
+            "processed": False,
+            "remote_work": False,
+            "contract_hiring": False,
+            "key_skills": "",
+            "job_role": "",
+            "raw_data": "",
+            "shortlisted_index": "[]",
+            "noc": 0,
+            "job_description": "",
+            "status": "shortlist"
+        }).execute()
 
-    history_resp=supabase.table("history").insert({
-        "user_id": session["user_id"],
-        "creds": 0
-        }).execute()  
-    if not history_resp.data:
+        # Create history record
+        history_resp = supabase.table("history").insert({
+            "user_id": user_id,
+            "creds": 0
+        }).execute()
+        
+        if not history_resp.data:
             print("❌ Failed to insert history")
-            return "Error inserting history", 500
+            return jsonify({"error": "Error inserting history"}), 500
 
-    history_id = history_resp.data[0]["id"]
-    session["history_id"] = history_id
+        history_id = history_resp.data[0]["id"]
+        print(f"Created history record with ID: {history_id}")
 
-    if response.data:
-        return jsonify({"search_id": response.data[0]["id"]})
-    else:
-        return jsonify({"error": "Could not create search"}), 500
+        if response.data:
+            search_id = response.data[0]["id"]
+            print(f"Created search record with ID: {search_id}")
+            
+            return jsonify({
+                "success": True,
+                "search_id": search_id,
+                "history_id": history_id
+            })
+        else:
+            return jsonify({"error": "Could not create search"}), 500
+            
+    except Exception as e:
+        print(f"Create search error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/shortlist/<int:search_id>", methods=["GET", "POST"])
-@login_required
+@jwt_required
 def shortlist(search_id):
+    user = request.current_user
+    user_id = user['user_id']
     if request.method == "POST":
         candidate_data = request.form.get("candidateData", "").strip()
         skills = request.form.get("skills", "").strip()
@@ -310,76 +451,57 @@ def shortlist(search_id):
         final_candidates = scrape(candidate_data)
         shortlisted_indices = shortlist_candidates(final_candidates, skills)
 
-        # ✅ Save to session
-        session["shortlisted_indices"] = shortlisted_indices
-        session["shortlisted_count"] = len(shortlisted_indices)
-        
-
         # ✅ Update the search entry
         supabase.table("search").update({
             "raw_data": candidate_data,
             "key_skills": skills,
             "job_role": job_role,
-            "user_id": session["user_id"],
+            "user_id": user_id,
             "shortlisted_index": json.dumps(shortlisted_indices),
             "processed": True,
             "remote_work": False,
             "contract_hiring": False,
             "noc": noc,
             "job_description": jd_text,
-            "history_id":session["history_id"],
+            "history_id":search_id,
             "search_name": search_name,
             "status":"process"
         }).eq("id", search_id).execute()
-        deduct_credits(session["user_id"], "search", reference_id=None)
-        return jsonify(success=True)
+        deduct_credits(user_id, "search", reference_id=None)
+        return jsonify({"success":True})
 
 @app.route("/api/process/<int:search_id>", methods=["GET", "POST"])
-@login_required
+@jwt_required
 def process(search_id):
-    # print("\n==== Entered /api/process/<search_id> route ====")
-    # print("Session BEFORE reset:", dict(session))
+    user = request.current_user
+    user_id = user["user_id"]
 
-    # === Reset session only if search_id changed ===
-    if session.get("search_id") != search_id:
-        print("Resetting session for new search_id")
-        session["search_id"] = search_id
-        session["collected_resumes"] = []
-        session["resume_dict"] = {}
-        session["right_fields"] = None
-        session["sl_count"]=0
+    # === Load search ===
+    result = supabase.table("search").select("shortlisted_index, process_state").eq("id", search_id).single().execute()
+    if not result.data:
+        return jsonify(success=False, error="Search not found"), 404
 
+    shortlisted = result.data.get("shortlisted_index") or []
+    if isinstance(shortlisted, str):
+        shortlisted = json.loads(shortlisted or "[]")
+
+    process_state = result.data.get("process_state") or {}
+
+    # 🔹 Ensure process_state is always a dict
+    if isinstance(process_state, str):
         try:
-            result = supabase.table("search").select("shortlisted_index").eq("id", search_id).single().execute()
-            shortlisted = result.data.get("shortlisted_index", [])
-            if isinstance(shortlisted, str):
-                try:
-                    shortlisted = ast.literal_eval(shortlisted)
-                except Exception:
-                    shortlisted = []
-            session["shortlisted_indices"] = shortlisted
-            session["shortlisted_count"] = len(shortlisted)
-            # print("Loaded shortlisted_indices:", shortlisted)
-        except Exception as e:
-            return jsonify({"success": False, "error": str(e)}), 500
+            process_state = json.loads(process_state or "{}")
+        except json.JSONDecodeError:
+            process_state = {}
 
-    # Ensure keys exist
-    session.setdefault("collected_resumes", [])
-    session.setdefault("resume_dict", {})
-    session.setdefault("right_fields", None)
-    session.setdefault("shortlisted_indices", [])
-    session.setdefault("shortlisted_count", 0)
-
-    shortlisted_indices = session["shortlisted_indices"]
-    target = session["shortlisted_count"]
-    submitted = len(session["collected_resumes"])
-    candidate_index = shortlisted_indices[submitted] if submitted < target else None
+    submitted = len(process_state.get("resume_dict", {}))
+    target = len(shortlisted)
+    candidate_index = shortlisted[submitted] if submitted < target else None
     is_last = (submitted == target - 1)
 
-    # === POST (Form Submission) ===
+    # === POST (submit resume) ===
     if request.method == "POST":
         resume_text = request.form.get("resumeText", "").strip()
-        session["sl_count"]+=1
         hiring_company = request.form.get("hiringCompany", "").strip()
         company_location = request.form.get("companyLocation", "").strip()
         hr_company = request.form.get("hrCompany", "").strip()
@@ -391,35 +513,24 @@ def process(search_id):
         errors = []
         if not resume_text:
             errors.append("Resume text is required.")
-        if not session["right_fields"]:
-            if not hiring_company:
-                errors.append("Hiring Company is required.")
-            if not company_location:
-                errors.append("Company Location is required.")
-            if not hr_company:
-                errors.append("HR Company is required.")
-            if not notice_period:
-                errors.append("Notice Period is required.")
+        # Only validate these once (first candidate)
+        if "right_fields" not in process_state:
+            if not hiring_company: errors.append("Hiring Company is required.")
+            if not company_location: errors.append("Company Location is required.")
+            if not hr_company: errors.append("HR Company is required.")
+            if not notice_period: errors.append("Notice Period is required.")
 
         if errors:
-            return jsonify({"success": False, "errors": errors}), 400
+            return jsonify(success=False, errors=errors), 400
 
-        # Handle optional CSV file
-        csv_file = request.files.get("csvFile")
-        if csv_file:
-            print("Received CSV file:", csv_file.filename)
-            # Optional CSV parsing logic here
+        # === Update resume_dict ===
+        resume_dict = process_state.get("resume_dict", {})
+        resume_dict[f"candidate_{candidate_index}"] = resume_text
+        process_state["resume_dict"] = resume_dict
 
-        # === Store resume data ===
-        session["resume_dict"][f"candidate_{candidate_index}"] = resume_text
-        session["collected_resumes"].append({
-            "short_idx": candidate_index,
-            "resumeText": resume_text
-        })
-        print(session["resume_dict"])
-        # === Store right_fields only once ===
-        if not session["right_fields"]:
-            session["right_fields"] = {
+        # === Set right_fields once ===
+        if "right_fields" not in process_state:
+            process_state["right_fields"] = {
                 "hiringCompany": hiring_company,
                 "companyLocation": company_location,
                 "hrCompany": hr_company,
@@ -427,208 +538,314 @@ def process(search_id):
                 "remoteWork": remote_work,
                 "contractH": contract_h,
             }
+            # also update search table
+            supabase.table("search").update({
+                "rc_name": hiring_company,
+                "company_location": company_location,
+                "hc_name": hr_company,
+                "notice_period": notice_period,
+                "remote_work": remote_work,
+                "contract_hiring": contract_h,
+                "user_id": user_id
+            }).eq("id", search_id).execute()
 
-            try:
-                supabase.table("search").update({
-                    "rc_name": hiring_company,
-                    "company_location": company_location,
-                    "hc_name": hr_company,
-                    "notice_period": notice_period,
-                    "remote_work": remote_work,
-                    "contract_hiring": contract_h,
-                    "user_id": session["user_id"]
-                }).eq("id", session["search_id"]).execute()
-            except Exception as e:
-                print("Failed to update job details:", str(e))
+        # === Save custom question if final ===
+        if submitted + 1 == target and custom_question:
+            process_state["custom_question"] = custom_question
+            supabase.table("search").update({
+                "custom_question": custom_question
+            }).eq("id", search_id).execute()
 
-        # === Save custom question if it's the last submission ===
-        submitted = len(session["collected_resumes"])
-        if submitted == target and custom_question:
-            try:
-                supabase.table("search").update({
-                    "custom_question": custom_question
-                }).eq("id", session["search_id"]).execute()
-            except Exception as e:
-                print("Failed to save custom question:", str(e))
+        # === Persist process_state ===
+        supabase.table("search").update({
+            "process_state": json.dumps(process_state)
+        }).eq("id", search_id).execute()
 
-        # === FINAL RESPONSE ===
-        
-        print(session["sl_count"],len(shortlisted_indices))
-        if session["sl_count"] == len(shortlisted_indices):
-            supabase.table("search").update({"status":"results"}).eq("id", session["search_id"]).execute()
-            deduct_credits(session["user_id"], "process_candidate", reference_id=None)
+        submitted = len(resume_dict)
+        if submitted == target:
+            supabase.table("search").update({"status": "results"}).eq("id", search_id).execute()
+            deduct_credits(user_id, "process_candidate", reference_id=None)
             return jsonify({
                 "success": True,
                 "submitted": submitted,
                 "target": target,
                 "candidateIndex": candidate_index,
                 "isLast": True,
-                "right_fields": session["right_fields"],
+                "right_fields": process_state["right_fields"],
                 "next": False,
                 "redirect": "/loading"
             })
 
-        # NEXT candidate
-        next_index = shortlisted_indices[submitted]
+        # Next candidate
+        next_index = shortlisted[submitted]
         return jsonify({
             "success": True,
             "submitted": submitted,
             "target": target,
             "candidateIndex": next_index,
             "isLast": (submitted == target - 1),
-            "right_fields": session["right_fields"],
+            "right_fields": process_state["right_fields"],
             "next": True
         })
 
-    # === GET (Initial Load) ===
+    # === GET (initial load) ===
     return jsonify({
         "success": True,
         "submitted": submitted,
         "target": target,
         "candidateIndex": candidate_index,
         "isLast": is_last,
-        "shortlisted_indices": shortlisted_indices,
-        "right_fields": session["right_fields"] or {},
+        "shortlisted_indices": shortlisted,
+        "right_fields": process_state.get("right_fields", {}),
         "next": True
     })
 
 @app.route("/api/get-questions", methods=["GET"])
+@jwt_required
 def generate_questions():
-    search_id = session.get("search_id")
+    """Generate interview questions with JWT authentication"""
+    # Get user info from JWT token
+    user = request.current_user
+    user_id = user['user_id']
+    
+    # Get search_id from query parameters or request body
+    search_id = request.args.get('search_id')
     if not search_id:
-        return jsonify({"error": "No active search session"}), 400
+        return jsonify({"error": "search_id parameter is required"}), 400
 
-    result = supabase.table("search").select("job_description").eq("id", search_id).execute().data
-    if not result or not result[0].get("job_description"):
-        return jsonify({"error": "No job description found"}), 404
+    try:
+        print(f"Generating questions for search_id: {search_id}, user_id: {user_id}")
+        
+        # Verify the search belongs to the current user (security check)
+        result = supabase.table("search").select("job_description").eq("id", search_id).eq("user_id", user_id).execute().data
+        
+        if not result:
+            return jsonify({"error": "Search not found or access denied"}), 404
+            
+        if not result[0].get("job_description"):
+            return jsonify({"error": "No job description found"}), 404
 
-    jd = result[0]["job_description"]
-    print(len(jd))
-    raw_questions = get_questions(jd)
+        jd = result[0]["job_description"]
+        print(f"Job description length: {len(jd)}")
+        
+        # Generate questions using AI parser
+        raw_questions = get_questions(jd)
 
-    if isinstance(raw_questions, str):
-        questions = [q.strip("1234567890.- ") for q in raw_questions.strip().split("\n") if q.strip()]
-    else:
-        questions = raw_questions  # Already a list
-    print(questions)
-    return jsonify({"questions": questions})
-
+        if isinstance(raw_questions, str):
+            questions = [q.strip("1234567890.- ") for q in raw_questions.strip().split("\n") if q.strip()]
+        else:
+            questions = raw_questions  # Already a list
+            
+        print(f"Generated {len(questions)} questions")
+        
+        return jsonify({
+            "success": True,
+            "questions": questions,
+            "search_id": search_id
+        })
+        
+    except Exception as e:
+        print(f"Generate questions error: {str(e)}")
+        return jsonify({"error": "Failed to generate questions"}), 500
 
 @app.route("/api/loading", methods=["GET"])
-@login_required
+@jwt_required
 def loading():
+    """Trigger candidate processing using JWT auth"""
+
     def process_candidates_async(combined_resumes, jd, skills, search_id, user_id):
-        candidate_data = get_candidate_details(combined_resumes, jd, skills)
-        
-        for candidate in candidate_data:
-            if candidate.get("match_score", 0) > 70:
-                name = candidate["name"]
-                email = candidate["email"]
-                phone_raw = candidate.get("phone", "")
-                phone_digits = ''.join(filter(str.isdigit, phone_raw))[-10:]
-                phone = int(phone_digits) if len(phone_digits) == 10 else None
+        try:
+            candidate_data = get_candidate_details(combined_resumes, jd, skills)
 
-                supabase.table("candidates").insert({
-                    "name": name,
-                    "email": email,
-                    "phone": phone,
-                    "skills": ", ".join(candidate["experience_in_skills"].keys()),
-                    "summary": candidate["job_summary"],
-                    "skills_experience": candidate["experience_in_skills"],
-                    "search_id": search_id,
-                    "history_id": search_id,
-                    "user_id": user_id,
-                    "total_experience": candidate["total_experience"],
-                    "relevant_work_experience": candidate["relevant_experience"],
-                    "match_score": candidate["match_score"]
-                }).execute()
+            for candidate in candidate_data:
+                if candidate.get("match_score", 0) > 70:
+                    name = candidate.get("name")
+                    email = candidate.get("email")
+                    phone_raw = candidate.get("phone", "")
+                    phone_digits = "".join(filter(str.isdigit, phone_raw))[-10:]
+                    phone = int(phone_digits) if len(phone_digits) == 10 else None
 
-        # ✅ Mark search as processed
-        supabase.table("search").update({"processed": True}).eq("id", search_id).execute()
+                    supabase.table("candidates").insert({
+                        "name": name,
+                        "email": email,
+                        "phone": phone,
+                        "skills": ", ".join(candidate["experience_in_skills"].keys()),
+                        "summary": candidate["job_summary"],
+                        "skills_experience": candidate["experience_in_skills"],
+                        "search_id": search_id,
+                        "history_id": search_id,
+                        "user_id": user_id,
+                        "total_experience": candidate["total_experience"],
+                        "relevant_work_experience": candidate["relevant_experience"],
+                        "match_score": candidate["match_score"]
+                    }).execute()
 
-    # Prepare combined resumes
-    resume_dict = session.get("resume_dict", {})
-    print(len(resume_dict))
-    combined_resumes = "\n".join(resume_dict.values())
+            # ✅ Mark search as processed
+            supabase.table("search").update({"processed": True}).eq("id", search_id).execute()
 
-    # Get JD and skills
-    search_id = session["search_id"]
-    user_id = session["user_id"]
+        except Exception as e:
+            print(f"Error in async processing: {e}")
 
-    jd_resp = supabase.table("search").select("job_description", "key_skills").eq("id", search_id).single().execute()
-    jd = jd_resp.data["job_description"]
-    skills = jd_resp.data["key_skills"]
+    try:
+        # ✅ Extract user from JWT
+        user = request.current_user
+        user_id = user["user_id"]
 
-    # Start background processing thread
-    thread = threading.Thread(
-        target=process_candidates_async,
-        args=(combined_resumes, jd, skills, search_id, user_id)
-    )
-    thread.start()
+        # ✅ Get search_id from query
+        search_id = request.args.get("search_id")
+        if not search_id:
+            return jsonify({"error": "search_id is required"}), 400
 
-    # ✅ Return a JSON response immediately
-    return jsonify({"message": "Processing started"}), 200
+        # ✅ Fetch JD, skills, and process_state (stringified JSON)
+        search_resp = (
+            supabase.table("search")
+            .select("job_description, key_skills, process_state")
+            .eq("id", search_id)
+            .eq("user_id", user_id)
+            .single()
+            .execute()
+        )
 
+        if not search_resp.data:
+            return jsonify({"error": "Search not found or unauthorized"}), 404
+
+        jd = search_resp.data.get("job_description")
+        skills = search_resp.data.get("key_skills")
+
+        # 🔑 process_state is stored as JSON string → decode it
+        process_state_raw = search_resp.data.get("process_state")
+        try:
+            process_state = json.loads(process_state_raw) if process_state_raw else {}
+        except Exception as e:
+            print(f"Error decoding process_state JSON: {e}")
+            process_state = {}
+
+        resume_dict = process_state.get("resume_dict", {})
+        combined_resumes = "\n".join(resume_dict.values())
+
+        # ✅ Start background processing thread
+        thread = threading.Thread(
+            target=process_candidates_async,
+            args=(combined_resumes, jd, skills, search_id, user_id),
+        )
+        thread.start()
+
+        return jsonify({"message": "Processing started", "search_id": search_id}), 200
+
+    except Exception as e:
+        print(f"Loading route error: {e}")
+        return jsonify({"error": "Failed to trigger candidate processing"}), 500
 
 @app.route("/api/check-processing", methods=["GET"])
-@login_required
+@jwt_required
 def check_processing_status():
-    search_id = session.get("search_id")
+    """Check processing status with JWT authentication"""
+    # Get user info from JWT token
+    user = request.current_user
+    user_id = user['user_id']
+    
+    # Get search_id from query parameters
+    search_id = request.args.get('search_id')
     if not search_id:
-        return jsonify({"error": "Search ID not found"}), 400
+        return jsonify({"error": "search_id parameter is required"}), 400
 
-    result = supabase.table("search").select("processed").eq("id", search_id).single().execute()
-    is_done = result.data.get("processed", False)
+    try:
+        print(f"Checking processing status for search_id: {search_id}, user_id: {user_id}")
+        
+        # Verify the search belongs to the current user (security check)
+        result = supabase.table("search").select("processed").eq("id", search_id).eq("user_id", user_id).single().execute()
+        
+        if not result.data:
+            return jsonify({"error": "Search not found or access denied"}), 404
+            
+        is_done = result.data.get("processed", False)
+        
+        print(f"Processing status for search {search_id}: {'Complete' if is_done else 'In Progress'}")
 
-    return jsonify({"processed": is_done,"search_id": search_id})
+        return jsonify({
+            "success": True,
+            "processed": is_done,
+            "search_id": search_id
+        })
+        
+    except Exception as e:
+        print(f"Check processing status error: {str(e)}")
+        return jsonify({"error": "Failed to check processing status"}), 500
 
 @app.route('/api/results', methods=["GET"])
-@login_required
+@jwt_required
 def results():
-    if request.args.get('searchID'):
-        session["search_id"] = int(request.args.get('searchID'))
-        print("Search ID:", session["search_id"])
+    """Get search results with JWT authentication"""
+    # Get user info from JWT token
+    user = request.current_user
+    user_id = user['user_id']
     
-    response = supabase.table("candidates").select("*").eq("search_id", session["search_id"]).execute()
-    data = response.data or []
+    # Get search_id from query parameters
+    search_id = request.args.get('searchID')
+    if not search_id:
+        return jsonify({"error": "searchID parameter is required"}), 400
 
-    shortlisted_candidates = []
-    calls_scheduled = 0
-    rescheduled_calls = 0
+    try:
+        search_id = int(search_id)
+        print(f"Fetching results for search_id: {search_id}, user_id: {user_id}")
+        
+        # Verify the search belongs to the current user (security check)
+        search_check = supabase.table("search").select("id").eq("id", search_id).eq("user_id", user_id).execute()
+        if not search_check.data:
+            return jsonify({"error": "Search not found or access denied"}), 404
+        
+        # Get candidates for this search
+        response = supabase.table("candidates").select("*").eq("search_id", search_id).execute()
+        data = response.data or []
 
-    for person in data:
-        call_status = person.get("call_status") or "not_called"
-        if call_status == "CALLED" or call_status == "Not Answered" or call_status == "Re-schedule":
-            calls_scheduled += 1
-        if call_status == "Re-schedule":
-            rescheduled_calls += 1
+        shortlisted_candidates = []
+        calls_scheduled = 0
+        rescheduled_calls = 0
 
-        candidate = {
-            "id": person.get("id"),  # used as key in React
-            "name": person.get("name", "Unknown"),
-            "phone": str(person.get("phone", "0000000000")),
-            "skills": person.get("skills", ""),
-            "email": person.get("email", "noemail@example.com"),
-            "summary": person.get("summary"),
-            "skills_experience": person.get("skills_experience"),  
-            "totalExp": person.get("total_experience"),
-            "relevantExp": person.get("relevant_work_experience"),
-            "call_status": call_status,
-            "match_score": person.get("match_score") or 0,
-            "liked": person.get("liked") or False,
-            "join_status": person.get("join_status") or False,
-            "status": person.get("status") or "pending"
-        }
-        shortlisted_candidates.append(candidate)
-    print(shortlist_candidates)
-    return jsonify({
-        "candidates": shortlisted_candidates,
-        "total": len(shortlisted_candidates),
-        "calls_scheduled": calls_scheduled,
-        "rescheduled_calls": rescheduled_calls
-    })
+        for person in data:
+            call_status = person.get("call_status") or "not_called"
+            if call_status == "CALLED" or call_status == "Not Answered" or call_status == "Re-schedule":
+                calls_scheduled += 1
+            if call_status == "Re-schedule":
+                rescheduled_calls += 1
 
+            candidate = {
+                "id": person.get("id"),  # used as key in React
+                "name": person.get("name", "Unknown"),
+                "phone": str(person.get("phone", "0000000000")),
+                "skills": person.get("skills", ""),
+                "email": person.get("email", "noemail@example.com"),
+                "summary": person.get("summary"),
+                "skills_experience": person.get("skills_experience"),  
+                "totalExp": person.get("total_experience"),
+                "relevantExp": person.get("relevant_work_experience"),
+                "call_status": call_status,
+                "match_score": person.get("match_score") or 0,
+                "liked": person.get("liked") or False,
+                "join_status": person.get("join_status") or False,
+                "status": person.get("status") or "pending"
+            }
+            shortlisted_candidates.append(candidate)
+            
+        print(f"Retrieved {len(shortlisted_candidates)} candidates")
+        
+        return jsonify({
+            "success": True,
+            "candidates": shortlisted_candidates,
+            "total": len(shortlisted_candidates),
+            "calls_scheduled": calls_scheduled,
+            "rescheduled_calls": rescheduled_calls,
+            "search_id": search_id
+        })
+        
+    except ValueError:
+        return jsonify({"error": "Invalid searchID format"}), 400
+    except Exception as e:
+        print(f"Results API error: {str(e)}")
+        return jsonify({"error": "Failed to fetch results"}), 500
+    
 @app.route("/api/like-candidate", methods=["POST"])
+@jwt_required
 def like_candidate():
     data = request.get_json()
     candidate_id = data.get("candidate_id")
@@ -645,6 +862,7 @@ def like_candidate():
 
 
 @app.route("/api/unlike-candidate", methods=["POST"])
+@jwt_required
 def unlike_candidate():
     data = request.get_json()
     candidate_id = data.get("candidate_id")
@@ -659,6 +877,7 @@ def unlike_candidate():
 
 
 @app.route('/add-final-select', methods=['POST'])
+@jwt_required
 def mark_final_selects():
     data = request.json
     candidate_ids = data.get('candidate_ids', [])
@@ -669,6 +888,7 @@ def mark_final_selects():
     return jsonify({"message": "Updated successfully"}), 200
 
 @app.route("/api/final-selects", methods=["GET", "POST"])
+@jwt_required
 def final_selects():
     if request.method == "POST":
         data = request.get_json()
@@ -712,6 +932,7 @@ def final_selects():
 
 
 @app.route("/api/remove-final-select", methods=["POST"])
+@jwt_required
 def remove_final_select():
     data = request.get_json()
     candidate_id = data.get("candidate_id")
@@ -725,7 +946,6 @@ def remove_final_select():
     return jsonify({"status": "success"})
 
 # ─── Call Initiation Logic ───────────────────────────────────────────────────
-
 def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_location, notice_period,custom_question,contracth,remotew):
     print("Call candidate works ")
     print(f"Candidate ID {candidate_id}")
@@ -761,7 +981,7 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
         return {"name": name, "error": str(err)}
 
 @app.route('/call-single', methods=['POST'])
-@login_required
+@jwt_required
 def call_single():
     data = request.get_json()
     print("works")
@@ -803,7 +1023,7 @@ def call_single():
     return jsonify({'status': 'success', 'result': result}), 200
 
 @app.route("/call", methods=["POST"])
-@login_required
+@jwt_required
 def initiate_call():
     data = request.get_json()
     candidates = data.get("candidates", [])
@@ -890,10 +1110,6 @@ def webhook():
     structuredData = analysis.get("structuredData", {})
     status=structuredData.get("re-schedule","")
     success_eval = analysis.get("successEvaluation", "")
-
-
-   
-    
     call_status=None
     if end_call_status == "ended":
         call_status = "Not Answered"
@@ -921,7 +1137,7 @@ def webhook():
     return jsonify({"status": "received"}), 200
 
 @app.route("/api/transcript/<int:candidate_id>")
-@login_required
+@jwt_required
 def api_transcript(candidate_id):
     try:
         import json
@@ -997,17 +1213,14 @@ def api_transcript(candidate_id):
         return jsonify({"error": "Could not fetch transcript"}), 500
 
 @app.route("/api/dashboard", methods=["GET"])
+@jwt_required
 def dashboard():
-    # Debug session before checking
-    print("Dashboard endpoint - Session check:")
-    debug_session()
-    
-    if "user" not in session or "user_id" not in session:
-        print("Unauthorized access attempt - no session data")
-        return jsonify({"error": "Unauthorized - Please login again"}), 401
-
+    """Dashboard API endpoint with JWT authentication"""
     try:
-        user_id = session["user_id"]
+        # Get user info from JWT token (set by @jwt_required decorator)
+        user = request.current_user
+        user_id = user['user_id']
+        
         print(f"Dashboard access granted for user_id: {user_id}")
 
         dashboard_data = {
@@ -1029,36 +1242,39 @@ def dashboard():
 # ------ to fetch and render search table data in frontend -------------------------------
 
 @app.route("/api/searches", methods=["GET"])
+@jwt_required
 def get_searches():
-    if "user" not in session:
-        return jsonify({"error": "Not logged in"}), 401
-
+    """Get user searches with JWT authentication"""
     try:
-        user_data = supabase.table("users").select("id").eq("email", session["user"]).execute()
-        user_id = user_data.data[0]["id"]
-        session["user_id"] = user_id  
-        # print(user_id)
+        # Get user info from JWT token (set by @jwt_required decorator)
+        user = request.current_user
+        user_id = user['user_id']
+        
+        print(f"Fetching searches for user_id: {user_id}")
 
         response = supabase.table("search").select("*").eq("user_id", user_id).execute()
-        # print(response.data)
         return jsonify(response.data)
+        
     except Exception as e:
+        print(f"Get searches error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/clear_search_session", methods=["POST"])
-def clear_search_session():
-    # Keys to keep
-    keys_to_keep = {"user", "user_id"}
 
-    # Remove all other keys except user and user_id
-    keys_to_remove = [key for key in session.keys() if key not in keys_to_keep]
-    for key in keys_to_remove:
-        session.pop(key, None)
+# @app.route("/api/clear_search_session", methods=["POST"])
+# def clear_search_session():
+#     # Keys to keep
+#     keys_to_keep = {"user", "user_id"}
 
-    return jsonify({"message": "Search session cleared, user session intact"})
+#     # Remove all other keys except user and user_id
+#     keys_to_remove = [key for key in session.keys() if key not in keys_to_keep]
+#     for key in keys_to_remove:
+#         session.pop(key, None)
+
+#     return jsonify({"message": "Search session cleared, user session intact"})
 
 @app.route("/api/get-liked-candiates", methods=["GET"])
+@jwt_required
 def get_liked_candidates():
     
     response = supabase.table("candidates") \
@@ -1070,9 +1286,10 @@ def get_liked_candidates():
     return jsonify(candidates)
 
 @app.route("/api/user-profile", methods=["GET"])
-@login_required
+@jwt_required
 def get_user_profile():
-    user_id = session.get("user_id")
+    user = request.current_user
+    user_id = user['user_id']
     if not user_id:
         return jsonify({"error": "Not logged in"}), 401
 
@@ -1090,12 +1307,16 @@ def get_user_profile():
     })
 
 @app.route("/api/billing-data", methods=["GET"])
+@jwt_required
 def get_billing_data():
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "User not logged in"}), 401
+    """Get billing data with JWT authentication"""
+    # Get user info from JWT token
+    user = request.current_user
+    user_id = user['user_id']
 
     try:
+        print(f"Fetching billing data for user_id: {user_id}")
+        
         # Fetch recent credit logs
         credit_logs_resp = supabase.table("credit_logs") \
             .select("*") \
@@ -1136,27 +1357,36 @@ def get_billing_data():
 
         # Calculate total credits used
         total_deductions = sum(log["deductions"] for log in credit_logs if "deductions" in log)
-
         current_credits = max(0, start_creds - total_deductions)
 
-        return jsonify({
+        billing_data = {
             "current_credits": current_credits,
             "credit_logs": credit_logs,
-            "payment_history": payment_history
-        })
+            "payment_history": payment_history,
+            "start_credits": start_creds,
+            "total_deductions": total_deductions
+        }
+        
+        print(f"Billing data retrieved: Credits {current_credits}, Logs {len(credit_logs)}, Payments {len(payment_history)}")
+        
+        return jsonify(billing_data)
 
     except Exception as e:
-        print(f"Billing API error: {e}")
+        print(f"Billing API error: {str(e)}")
         return jsonify({"error": "Internal Server Error"}), 500
 
 @app.route("/api/settings", methods=["GET", "POST"])
+@jwt_required
 def user_settings():
-    user_id = session.get("user_id")
-    if not user_id:
-        return jsonify({"error": "User not logged in"}), 401
+    """Get and update user settings with JWT authentication"""
+    # Get user info from JWT token
+    user = request.current_user
+    user_id = user['user_id']
 
     if request.method == "GET":
         try:
+            print(f"Fetching settings for user_id: {user_id}")
+            
             response = supabase.table("account_preferences") \
                 .select("dark_theme, credit_warnings, weekly_reports, email_alerts") \
                 .eq("user_id", user_id) \
@@ -1165,21 +1395,25 @@ def user_settings():
 
             data = response.data[0] if response.data else {}
 
-            return jsonify({
+            settings = {
                 "creditWarnings": data.get("credit_warnings", True),
                 "weeklyReports": data.get("weekly_reports", False),
                 "emailAlerts": data.get("email_alerts", True),
                 "darkTheme": data.get("dark_theme", False)
-            })
+            }
+            
+            print(f"Retrieved settings: {settings}")
+            return jsonify(settings)
 
         except Exception as e:
-            print("Error fetching settings:", e)
+            print(f"Error fetching settings: {str(e)}")
             return jsonify({"error": "Internal server error"}), 500
 
     elif request.method == "POST":
-        data = request.get_json()
-
         try:
+            data = request.get_json()
+            print(f"Updating settings for user_id: {user_id} with data: {data}")
+
             # Check if a row exists for this user
             existing = supabase.table("account_preferences") \
                 .select("id") \
@@ -1197,14 +1431,19 @@ def user_settings():
 
             if existing.data:
                 pref_id = existing.data[0]["id"]
+                print(f"Updating existing preferences with ID: {pref_id}")
                 supabase.table("account_preferences").update(update_data).eq("id", pref_id).execute()
             else:
+                print("Creating new preferences record")
                 supabase.table("account_preferences").insert(update_data).execute()
 
-            return jsonify({"message": "Settings updated successfully"})
+            return jsonify({
+                "success": True,
+                "message": "Settings updated successfully"
+            })
 
         except Exception as e:
-            print("Error updating settings:", e)
+            print(f"Error updating settings: {str(e)}")
             return jsonify({"error": "Failed to update settings"}), 500
 
 
@@ -1229,11 +1468,11 @@ def deduct_credits(user_id, action_type, reference_id=None):
     supabase.table("users").update({"creds": new_balance}).eq("id", user_id).execute()
 
     # Log it
-    supabase.table("credits_logs").insert({
+    supabase.table("credit_logs").insert({
         "user_id": user_id,
         "action": action_type,
-        "credits_used": cost,
-        "reference_id": reference_id
+        "deductions": cost,
+        # "reference_id": reference_id
     }).execute()
 
 
