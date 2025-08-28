@@ -1252,7 +1252,7 @@ def get_searches():
         
         print(f"Fetching searches for user_id: {user_id}")
 
-        response = supabase.table("search").select("*").eq("user_id", user_id).execute()
+        response = supabase.table("search").select("*").eq("user_id", user_id).order("id", desc=True).execute()
         return jsonify(response.data)
         
     except Exception as e:
