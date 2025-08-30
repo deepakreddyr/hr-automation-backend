@@ -876,7 +876,7 @@ def unlike_candidate():
     return jsonify({"success": True}), 200
 
 
-@app.route('/add-final-select', methods=['POST'])
+@app.route('/api/add-final-select', methods=['POST'])
 @jwt_required
 def mark_final_selects():
     data = request.json
@@ -980,7 +980,7 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
     except Exception as err:
         return {"name": name, "error": str(err)}
 
-@app.route('/call-single', methods=['POST'])
+@app.route('/api/call-single', methods=['POST'])
 @jwt_required
 def call_single():
     data = request.get_json()
@@ -989,6 +989,7 @@ def call_single():
     if not data or 'name' not in data or 'phone' not in data:
         return jsonify({'error': 'Missing candidate data'}), 400
 
+    search_id = data['search_id']
     name = data['name']
     phone = data['phone']
     skills = data.get('skills', [])
@@ -997,7 +998,7 @@ def call_single():
 
     da=supabase.from_('search')\
     .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id')\
-    .eq('id',session['search_id'])\
+    .eq('id',search_id)\
     .execute()
 
     call_data=da.data[0]
@@ -1022,16 +1023,16 @@ def call_single():
     result = call_candidate(name, phone, skills=call_data["key_skills"], employer=call_data["rc_name"], hr=call_data["hc_name"],candidate_id=candidate_id,work_location=call_data["company_location"],notice_period=call_data["notice_period"],custom_question=custom_question,contracth=contracth,remotew=remotew)
     return jsonify({'status': 'success', 'result': result}), 200
 
-@app.route("/call", methods=["POST"])
+@app.route("/api/call", methods=["POST"])
 @jwt_required
 def initiate_call():
     data = request.get_json()
     candidates = data.get("candidates", [])
-
+    search_id=data.get("search_id",[])
     results = []
     da=supabase.from_('search')\
     .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id')\
-    .eq('id',session['search_id'])\
+    .eq('id',search_id)\
     .execute()
 
     call_data=da.data[0]
@@ -1089,43 +1090,60 @@ def add_call_data(transcript,summary,structuredData,call_status,success_eval,pho
     print("Added data to call")
 
 
-# ─── Webhook Receiver ────────────────────────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
     print(data)
 
     message = data.get("message", data)
-    end_call_status=message.get("status","")
-    call=message.get("call")
-    assistantOverrides=call.get("assistantOverrides")
-    variableValues=assistantOverrides.get("variableValues")
-    candidate_id=variableValues.get("candidate_id")
-    customer = call.get("customer", "")
-    name=customer.get("name","")
+    end_call_status = message.get("status", "")
+    call = message.get("call", {})
+    assistantOverrides = call.get("assistantOverrides", {})
+    variableValues = assistantOverrides.get("variableValues", {})
+    candidate_id = variableValues.get("candidate_id")
+
+    # Lookup candidate to get user_id
+    candidate_res = supabase.table("candidates").select("id, search_id").eq("id", candidate_id).execute()
+    if not candidate_res.data:
+        return jsonify({"error": "Candidate not found"}), 404
+
+    search_id = candidate_res.data[0]["search_id"]
+
+    search_res = supabase.table("search").select("user_id").eq("id", search_id).execute()
+    if not search_res.data:
+        return jsonify({"error": "Search not found"}), 404
+
+    user_id = search_res.data[0]["user_id"]   # <-- instead of session["user_id"]
+
+    customer = call.get("customer", {})
+    name = customer.get("name", "")
     phone = int(customer.get("number", "")[-10:]) if customer.get("number") else None
     transcript = message.get("transcript", "")
     analysis = message.get("analysis", {})
     summary = analysis.get("summary", "")
     structuredData = analysis.get("structuredData", {})
-    status=structuredData.get("re-schedule","")
+    status = structuredData.get("re-schedule", "")
     success_eval = analysis.get("successEvaluation", "")
-    call_status=None
+    durationMinutes = message.get("durationMinutes", "")
+
+    call_status = None
+
     if end_call_status == "ended":
         call_status = "Not Answered"
         supabase.table("candidates").update({
-        "call_status":call_status
+            "call_status": call_status
         }).eq('id', candidate_id).execute()
+
     if status == "yes":
-        durationMinutes=message.get("durationMinutes","")
         call_status = "Re-schedule"
-        add_call_data(transcript,summary,structuredData,call_status,success_eval,phone,durationMinutes,name,candidate_id=int(candidate_id))
-        deduct_credits(session["user_id"], "rescheduled_call", reference_id=None)
+        add_call_data(transcript, summary, structuredData, call_status, success_eval, phone, durationMinutes, name, candidate_id=int(candidate_id))
+        deduct_credits(user_id, "rescheduled_call", reference_id=None)
+
     elif status == "no":
         call_status = "Called & Answered"
-        add_call_data(transcript,summary,structuredData,call_status,success_eval,phone,durationMinutes,name,candidate_id=int(candidate_id))
-        deduct_credits(session["user_id"], "ai_call", reference_id=None)
-    
+        add_call_data(transcript, summary, structuredData, call_status, success_eval, phone, durationMinutes, name, candidate_id=int(candidate_id))
+        deduct_credits(user_id, "ai_call", reference_id=None)
+
     print(f"Transcript : {transcript}")
     print(f"Summary : {summary}")
     print(f"Structured data : {structuredData}")
@@ -1134,6 +1152,7 @@ def webhook():
     print(f"Phone : {phone}")
     print(candidate_id)
     print("✅ Inserted into calls table")
+
     return jsonify({"status": "received"}), 200
 
 @app.route("/api/transcript/<int:candidate_id>")
@@ -1258,20 +1277,6 @@ def get_searches():
     except Exception as e:
         print(f"Get searches error: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-
-
-# @app.route("/api/clear_search_session", methods=["POST"])
-# def clear_search_session():
-#     # Keys to keep
-#     keys_to_keep = {"user", "user_id"}
-
-#     # Remove all other keys except user and user_id
-#     keys_to_remove = [key for key in session.keys() if key not in keys_to_keep]
-#     for key in keys_to_remove:
-#         session.pop(key, None)
-
-#     return jsonify({"message": "Search session cleared, user session intact"})
 
 @app.route("/api/get-liked-candiates", methods=["GET"])
 @jwt_required
