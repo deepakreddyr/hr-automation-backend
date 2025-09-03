@@ -351,7 +351,6 @@ def optional_jwt(f):
 @jwt_required
 def get_search_status(search_id):
     response = supabase.table("search").select("status").eq("id", search_id).single().execute()
-    print(response)
     if response.data:
         return jsonify({"status": response.data.get("status")})
     else:
@@ -369,19 +368,7 @@ def create_search():
         print(f"Creating search for user_id: {user_id}")
         
         # Create search record
-        response = supabase.table("search").insert({
-            "user_id": user_id,
-            "processed": False,
-            "remote_work": False,
-            "contract_hiring": False,
-            "key_skills": "",
-            "job_role": "",
-            "raw_data": "",
-            "shortlisted_index": "[]",
-            "noc": 0,
-            "job_description": "",
-            "status": "shortlist"
-        }).execute()
+        
 
         # Create history record
         history_resp = supabase.table("history").insert({
@@ -395,7 +382,20 @@ def create_search():
 
         history_id = history_resp.data[0]["id"]
         print(f"Created history record with ID: {history_id}")
-
+        response = supabase.table("search").insert({
+            "user_id": user_id,
+            "history_id": history_id,
+            "processed": False,
+            "remote_work": False,
+            "contract_hiring": False,
+            "key_skills": "",
+            "job_role": "",
+            "raw_data": "",
+            "shortlisted_index": "[]",
+            "noc": 0,
+            "job_description": "",
+            "status": "shortlist"
+        }).execute()
         if response.data:
             search_id = response.data[0]["id"]
             print(f"Created search record with ID: {search_id}")
