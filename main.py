@@ -9,13 +9,9 @@ from flask import (
     redirect, url_for, jsonify, flash, make_response
 )
 from dashboard_data import (
-    get_todays_searches,
-    get_todays_candidates,
-    get_new_joinees,
+    get_dashboard_data,
     get_creds_used,
-    get_user_name,
-    get_people_called,
-    get_weekly_activity
+    get_user_name
 )
 import fitz  
 from flask_cors import CORS
@@ -459,11 +455,10 @@ def shortlist(search_id):
             "user_id": user_id,
             "shortlisted_index": json.dumps(shortlisted_indices),
             "processed": True,
-            "remote_work": False,
+            # "remote_work": False,
             "contract_hiring": False,
             "noc": noc,
             "job_description": jd_text,
-            "history_id":search_id,
             "search_name": search_name,
             "status":"process"
         }).eq("id", search_id).execute()
@@ -1234,26 +1229,19 @@ def api_transcript(candidate_id):
 @app.route("/api/dashboard", methods=["GET"])
 @jwt_required
 def dashboard():
-    """Dashboard API endpoint with JWT authentication"""
     try:
-        # Get user info from JWT token (set by @jwt_required decorator)
         user = request.current_user
         user_id = user['user_id']
-        
+
         print(f"Dashboard access granted for user_id: {user_id}")
 
-        dashboard_data = {
-            "todays_searches": get_todays_searches(user_id),
-            "todays_candidates": get_todays_candidates(user_id),
-            "new_joinees": get_new_joinees(user_id),
-            "creds_used": get_creds_used(user_id),
-            "user_name": get_user_name(user_id),
-            "people_called": get_people_called(user_id),
-            "weekly_activity": get_weekly_activity(user_id)
-        }
-        
+        dashboard_data = get_dashboard_data(user_id)
+
+        # Add extra simple lookups
+        dashboard_data["creds_used"] = get_creds_used(user_id)
+        dashboard_data["user_name"] = get_user_name(user_id)
+
         return make_response(jsonify(dashboard_data))
-        
     except Exception as e:
         print(f"Dashboard error: {str(e)}")
         return jsonify({"error": str(e)}), 500
