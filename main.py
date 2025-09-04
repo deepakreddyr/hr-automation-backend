@@ -445,7 +445,9 @@ def shortlist(search_id):
 
         # ✅ Extract, shortlist, update
         final_candidates = scrape(candidate_data)
+        print(f"SCRAPED DATA {final_candidates}")
         shortlisted_indices = shortlist_candidates(final_candidates, skills)
+        print(f"SHORTLISTED DATA {shortlisted_indices}")
 
         # ✅ Update the search entry
         supabase.table("search").update({
@@ -465,101 +467,110 @@ def shortlist(search_id):
         deduct_credits(user_id, "search", reference_id=None)
         return jsonify({"success":True})
 
-@app.route("/api/process/<int:search_id>", methods=["GET", "POST"])
-@jwt_required
-def process(search_id):
-    user = request.current_user
-    user_id = user["user_id"]
+@app.route("/api/process/<int:search_id>", methods=["GET", "POST"]) 
+@jwt_required 
+def process(search_id):     
+    user = request.current_user     
+    user_id = user["user_id"]      
 
-    # === Load search ===
-    result = supabase.table("search").select("shortlisted_index, process_state").eq("id", search_id).single().execute()
-    if not result.data:
-        return jsonify(success=False, error="Search not found"), 404
+    # === Load search ===     
+    result = supabase.table("search").select("shortlisted_index, process_state, job_description, key_skills").eq("id", search_id).single().execute()     
+    if not result.data:         
+        return jsonify(success=False, error="Search not found"), 404      
 
-    shortlisted = result.data.get("shortlisted_index") or []
-    if isinstance(shortlisted, str):
-        shortlisted = json.loads(shortlisted or "[]")
+    shortlisted = result.data.get("shortlisted_index") or []     
+    if isinstance(shortlisted, str):         
+        shortlisted = json.loads(shortlisted or "[]")      
 
-    process_state = result.data.get("process_state") or {}
+    process_state = result.data.get("process_state") or {}     
+    jd = result.data.get("job_description")     
+    skills = result.data.get("key_skills")      
 
-    # 🔹 Ensure process_state is always a dict
-    if isinstance(process_state, str):
-        try:
-            process_state = json.loads(process_state or "{}")
-        except json.JSONDecodeError:
-            process_state = {}
+    # Ensure process_state is always a dict     
+    if isinstance(process_state, str):         
+        try:             
+            process_state = json.loads(process_state or "{}")         
+        except json.JSONDecodeError:             
+            process_state = {}      
 
-    submitted = len(process_state.get("resume_dict", {}))
-    target = len(shortlisted)
-    candidate_index = shortlisted[submitted] if submitted < target else None
-    is_last = (submitted == target - 1)
+    submitted = len(process_state.get("resume_dict", {}))     
+    target = len(shortlisted)     
+    candidate_index = shortlisted[submitted] if submitted < target else None     
+    is_last = (submitted == target - 1)      
 
-    # === POST (submit resume) ===
-    if request.method == "POST":
-        resume_text = request.form.get("resumeText", "").strip()
-        hiring_company = request.form.get("hiringCompany", "").strip()
-        company_location = request.form.get("companyLocation", "").strip()
-        hr_company = request.form.get("hrCompany", "").strip()
-        notice_period = request.form.get("noticePeriod", "").strip()
-        remote_work = request.form.get("remoteWork") == "on"
-        contract_h = request.form.get("contractH") == "on"
-        custom_question = request.form.get("customQuestion", "").strip()
+    # === POST (submit resume) ===     
+    if request.method == "POST":         
+        resume_text = request.form.get("resumeText", "").strip()         
+        hiring_company = request.form.get("hiringCompany", "").strip()         
+        company_location = request.form.get("companyLocation", "").strip()         
+        hr_company = request.form.get("hrCompany", "").strip()         
+        notice_period = request.form.get("noticePeriod", "").strip()         
+        remote_work = request.form.get("remoteWork") == "on"         
+        contract_h = request.form.get("contractH") == "on"         
+        custom_question = request.form.get("customQuestion", "").strip()          
 
-        errors = []
-        if not resume_text:
-            errors.append("Resume text is required.")
-        # Only validate these once (first candidate)
-        if "right_fields" not in process_state:
-            if not hiring_company: errors.append("Hiring Company is required.")
-            if not company_location: errors.append("Company Location is required.")
-            if not hr_company: errors.append("HR Company is required.")
-            if not notice_period: errors.append("Notice Period is required.")
+        errors = []         
+        if not resume_text:             
+            errors.append("Resume text is required.")         
+        # Only validate these once (first candidate)         
+        if "right_fields" not in process_state:             
+            if not hiring_company: errors.append("Hiring Company is required.")             
+            if not company_location: errors.append("Company Location is required.")             
+            if not hr_company: errors.append("HR Company is required.")             
+            if not notice_period: errors.append("Notice Period is required.")          
 
-        if errors:
-            return jsonify(success=False, errors=errors), 400
+        if errors:             
+            return jsonify(success=False, errors=errors), 400          
 
-        # === Update resume_dict ===
-        resume_dict = process_state.get("resume_dict", {})
-        resume_dict[f"candidate_{candidate_index}"] = resume_text
-        process_state["resume_dict"] = resume_dict
+        # === Update resume_dict ===         
+        resume_dict = process_state.get("resume_dict", {})         
+        resume_dict[f"candidate_{candidate_index}"] = resume_text         
+        process_state["resume_dict"] = resume_dict          
 
-        # === Set right_fields once ===
-        if "right_fields" not in process_state:
-            process_state["right_fields"] = {
-                "hiringCompany": hiring_company,
-                "companyLocation": company_location,
-                "hrCompany": hr_company,
-                "noticePeriod": notice_period,
-                "remoteWork": remote_work,
-                "contractH": contract_h,
-            }
-            # also update search table
-            supabase.table("search").update({
-                "rc_name": hiring_company,
-                "company_location": company_location,
-                "hc_name": hr_company,
-                "notice_period": notice_period,
-                "remote_work": remote_work,
-                "contract_hiring": contract_h,
-                "user_id": user_id
-            }).eq("id", search_id).execute()
+        # === Set right_fields once ===         
+        if "right_fields" not in process_state:             
+            process_state["right_fields"] = {                 
+                "hiringCompany": hiring_company,                 
+                "companyLocation": company_location,                 
+                "hrCompany": hr_company,                 
+                "noticePeriod": notice_period,                 
+                "remoteWork": remote_work,                 
+                "contractH": contract_h,             
+            }             
+            # also update search table             
+            supabase.table("search").update({                 
+                "rc_name": hiring_company,                 
+                "company_location": company_location,                 
+                "hc_name": hr_company,                 
+                "notice_period": notice_period,                 
+                "remote_work": remote_work,                 
+                "contract_hiring": contract_h,                 
+                "user_id": user_id             
+            }).eq("id", search_id).execute()          
 
-        # === Save custom question if final ===
-        if submitted + 1 == target and custom_question:
-            process_state["custom_question"] = custom_question
-            supabase.table("search").update({
-                "custom_question": custom_question
-            }).eq("id", search_id).execute()
+        # === Save custom question if final ===         
+        if submitted + 1 == target and custom_question:             
+            process_state["custom_question"] = custom_question             
+            supabase.table("search").update({                 
+                "custom_question": custom_question             
+            }).eq("id", search_id).execute()          
 
-        # === Persist process_state ===
-        supabase.table("search").update({
-            "process_state": json.dumps(process_state)
-        }).eq("id", search_id).execute()
+        # === Persist process_state ===         
+        supabase.table("search").update({             
+            "process_state": json.dumps(process_state)         
+        }).eq("id", search_id).execute()          
 
-        submitted = len(resume_dict)
+        submitted = len(resume_dict)                  
+        
+        # === If this is the final submission, start processing ===         
         if submitted == target:
-            supabase.table("search").update({"status": "results"}).eq("id", search_id).execute()
-            deduct_credits(user_id, "process_candidate", reference_id=None)
+            # Set processing status immediately
+            supabase.table("search").update({
+                "status": "processing",
+                "processed": False
+            }).eq("id", search_id).execute()
+            
+            # Return loading state to frontend
             return jsonify({
                 "success": True,
                 "submitted": submitted,
@@ -568,33 +579,216 @@ def process(search_id):
                 "isLast": True,
                 "right_fields": process_state["right_fields"],
                 "next": False,
-                "redirect": "/loading"
+                "processing": True,  # Signal to show loading
+                "search_id": search_id
             })
 
-        # Next candidate
-        next_index = shortlisted[submitted]
-        return jsonify({
-            "success": True,
-            "submitted": submitted,
-            "target": target,
-            "candidateIndex": next_index,
-            "isLast": (submitted == target - 1),
-            "right_fields": process_state["right_fields"],
-            "next": True
-        })
+        # Next candidate (not final)         
+        next_index = shortlisted[submitted]         
+        return jsonify({             
+            "success": True,             
+            "submitted": submitted,             
+            "target": target,             
+            "candidateIndex": next_index,             
+            "isLast": (submitted == target - 1),             
+            "right_fields": process_state["right_fields"],             
+            "next": True         
+        })      
 
-    # === GET (initial load) ===
-    return jsonify({
-        "success": True,
-        "submitted": submitted,
-        "target": target,
-        "candidateIndex": candidate_index,
-        "isLast": is_last,
-        "shortlisted_indices": shortlisted,
-        "right_fields": process_state.get("right_fields", {}),
-        "next": True
+    # === GET (initial load) ===     
+    return jsonify({         
+        "success": True,         
+        "submitted": submitted,         
+        "target": target,         
+        "candidateIndex": candidate_index,         
+        "isLast": is_last,         
+        "shortlisted_indices": shortlisted,         
+        "right_fields": process_state.get("right_fields", {}),         
+        "next": True     
     })
 
+
+# New route to handle the actual processing (runs in background)
+@app.route("/api/process-candidates/<int:search_id>", methods=["POST"])
+@jwt_required
+def process_candidates(search_id):
+    user = request.current_user
+    user_id = user["user_id"]
+    
+    try:
+        # Get search data
+        result = supabase.table("search").select("process_state, job_description, key_skills").eq("id", search_id).single().execute()
+        if not result.data:
+            return jsonify(success=False, error="Search not found"), 404
+        
+        process_state = result.data.get("process_state") or {}
+        if isinstance(process_state, str):
+            process_state = json.loads(process_state or "{}")
+        
+        jd = result.data.get("job_description")
+        skills = result.data.get("key_skills")
+        resume_dict = process_state.get("resume_dict", {})
+        
+        print(f"Processing {len(resume_dict)} resumes for search {search_id}")
+        
+        # Get combined resumes
+        combined_resumes = "\n".join(resume_dict.values())
+        
+        # Validate required data
+        if not combined_resumes.strip():
+            supabase.table("search").update({"status": "error", "processed": True}).eq("id", search_id).execute()
+            return jsonify(success=False, error="No resume data found"), 400
+        if not jd or not jd.strip():
+            supabase.table("search").update({"status": "error", "processed": True}).eq("id", search_id).execute()
+            return jsonify(success=False, error="No job description found"), 400
+        
+        print(f"Processing {len(resume_dict)} resumes, combined length: {len(combined_resumes)}")
+        
+        # Get candidate details from AI
+        candidate_data = get_candidate_details(combined_resumes, jd, skills)
+        print(f"AI returned {len(candidate_data) if isinstance(candidate_data, list) else 0} candidates")
+        
+        if not candidate_data or not isinstance(candidate_data, list):
+            print("No valid candidate data received from AI")
+            supabase.table("search").update({"status": "error", "processed": True}).eq("id", search_id).execute()
+            return jsonify(success=False, error="Failed to process candidates"), 500
+        
+        # Remove duplicates and process candidates
+        unique_candidates = []
+        seen = set()
+        
+        for candidate in candidate_data:
+            if not isinstance(candidate, dict):
+                continue
+            
+            email = candidate.get("email", "").lower().strip()
+            phone_raw = candidate.get("phone", "")
+            phone_digits = "".join(filter(str.isdigit, phone_raw))[-10:] if phone_raw else ""
+            
+            identifier = f"{email}_{phone_digits}"
+            if identifier not in seen and email and phone_digits:
+                seen.add(identifier)
+                unique_candidates.append(candidate)
+        
+        print(f"Processing {len(unique_candidates)} unique candidates")
+        
+        # Insert candidates into database
+        inserted_count = 0
+        for candidate in unique_candidates:
+            try:
+                match_score = candidate.get("match_score", 0)
+                if match_score <= 70:
+                    continue
+                
+                name = candidate.get("name", "").strip()
+                email = candidate.get("email", "").strip().lower()
+                phone_raw = candidate.get("phone", "")
+                phone_digits = "".join(filter(str.isdigit, phone_raw))[-10:] if phone_raw else ""
+                
+                if not name or not email:
+                    continue
+                
+                phone = int(phone_digits) if len(phone_digits) == 10 else None
+                
+                # Check if candidate already exists
+                existing = supabase.table("candidates").select("id").eq("email", email).eq("search_id", search_id).execute()
+                if existing.data:
+                    continue
+                
+                # Prepare skills data
+                experience_in_skills = candidate.get("experience_in_skills", {})
+                skills_list = ", ".join(experience_in_skills.keys()) if experience_in_skills else ""
+                
+                # Insert candidate
+                insert_data = {
+                    "name": name,
+                    "email": email,
+                    "phone": phone,
+                    "skills": skills_list,
+                    "summary": candidate.get("job_summary", ""),
+                    "skills_experience": experience_in_skills,
+                    "search_id": search_id,
+                    "user_id": user_id,
+                    "total_experience": candidate.get("total_experience", ""),
+                    "relevant_work_experience": candidate.get("relevant_experience", ""),
+                    "match_score": match_score
+                }
+                
+                # Add history_id if it exists
+                try:
+                    history_check = supabase.table("history").select("id").eq("id", search_id).execute()
+                    if history_check.data:
+                        insert_data["history_id"] = search_id
+                except:
+                    pass
+                
+                result = supabase.table("candidates").insert(insert_data).execute()
+                
+                if result.data:
+                    inserted_count += 1
+                    print(f"Inserted candidate: {name} ({email})")
+                
+            except Exception as candidate_error:
+                print(f"Error processing candidate: {candidate_error}")
+                continue
+        
+        print(f"Successfully inserted {inserted_count} candidates")
+        
+        # Update search status
+        supabase.table("search").update({
+            "status": "results",
+            "processed": True
+        }).eq("id", search_id).execute()
+        
+        # Deduct credits
+        deduct_credits(user_id, "process_candidate", reference_id=None)
+        
+        return jsonify({
+            "success": True,
+            "candidates_processed": inserted_count,
+            "search_id": search_id
+        })
+        
+    except Exception as processing_error:
+        print(f"Error in candidate processing: {processing_error}")
+        import traceback
+        traceback.print_exc()
+        
+        # Mark as error but processed to prevent infinite loops
+        supabase.table("search").update({
+            "status": "error",
+            "processed": True
+        }).eq("id", search_id).execute()
+        
+        return jsonify({
+            "success": False,
+            "error": "Failed to process candidates. Please try again."
+        }), 500
+
+
+# Status checking route
+@app.route("/api/check-processing/<int:search_id>", methods=["GET"])
+@jwt_required
+def check_processing(search_id):
+    try:
+        result = supabase.table("search").select("status, processed").eq("id", search_id).single().execute()
+        if not result.data:
+            return jsonify(success=False, error="Search not found"), 404
+        
+        status = result.data.get("status")
+        processed = result.data.get("processed", False)
+        
+        return jsonify({
+            "success": True,
+            "processed": processed,
+            "status": status,
+            "search_id": search_id
+        })
+        
+    except Exception as e:
+        print(f"Error checking processing status: {e}")
+        return jsonify(success=False, error="Failed to check processing status"), 500
+    
 @app.route("/api/get-questions", methods=["GET"])
 @jwt_required
 def generate_questions():
@@ -642,239 +836,6 @@ def generate_questions():
     except Exception as e:
         print(f"Generate questions error: {str(e)}")
         return jsonify({"error": "Failed to generate questions"}), 500
-
-@app.route("/api/loading", methods=["GET"])
-@jwt_required
-def loading():
-    """Trigger candidate processing using JWT auth"""
-
-    def process_candidates_async(combined_resumes, jd, skills, search_id, user_id):
-        try:
-            print(f"Starting async processing for search_id: {search_id}")
-            candidate_data = get_candidate_details(combined_resumes, jd, skills)
-            print(f"✅ Parsed JSON: {candidate_data}")
-            
-            # Check if we got valid candidate data
-            if not candidate_data or not isinstance(candidate_data, list):
-                print("❌ No valid candidate data received")
-                return
-            
-            # Remove duplicates based on email and phone
-            unique_candidates = []
-            seen = set()
-            
-            for candidate in candidate_data:
-                if not isinstance(candidate, dict):
-                    continue
-                    
-                # Create unique identifier
-                email = candidate.get("email", "").lower().strip()
-                phone_raw = candidate.get("phone", "")
-                phone_digits = "".join(filter(str.isdigit, phone_raw))[-10:] if phone_raw else ""
-                
-                identifier = f"{email}_{phone_digits}"
-                if identifier not in seen and email and phone_digits:
-                    seen.add(identifier)
-                    unique_candidates.append(candidate)
-            
-            print(f"Processing {len(unique_candidates)} unique candidates")
-            
-            # Process each unique candidate
-            inserted_count = 0
-            for candidate in unique_candidates:
-                try:
-                    match_score = candidate.get("match_score", 0)
-                    if match_score <= 70:
-                        print(f"Skipping candidate with low match score: {match_score}")
-                        continue
-                    
-                    name = candidate.get("name", "").strip()
-                    email = candidate.get("email", "").strip().lower()
-                    phone_raw = candidate.get("phone", "")
-                    phone_digits = "".join(filter(str.isdigit, phone_raw))[-10:] if phone_raw else ""
-                    
-                    # Validate required fields
-                    if not name or not email:
-                        print(f"Skipping candidate - missing name or email: {name}, {email}")
-                        continue
-                    
-                    phone = int(phone_digits) if len(phone_digits) == 10 else None
-                    
-                    # Check if candidate already exists for this search
-                    existing = supabase.table("candidates").select("id").eq("email", email).eq("search_id", search_id).execute()
-                    if existing.data:
-                        print(f"Candidate {email} already exists for search {search_id}, skipping")
-                        continue
-                    
-                    # Prepare skills data
-                    experience_in_skills = candidate.get("experience_in_skills", {})
-                    skills_list = ", ".join(experience_in_skills.keys()) if experience_in_skills else ""
-                    
-                    # Insert candidate without history_id if it's causing issues
-                    insert_data = {
-                        "name": name,
-                        "email": email,
-                        "phone": phone,
-                        "skills": skills_list,
-                        "summary": candidate.get("job_summary", ""),
-                        "skills_experience": experience_in_skills,
-                        "search_id": search_id,
-                        "user_id": user_id,
-                        "total_experience": candidate.get("total_experience", ""),
-                        "relevant_work_experience": candidate.get("relevant_experience", ""),
-                        "match_score": match_score
-                    }
-                    
-                    # Only add history_id if we can verify it exists
-                    try:
-                        history_check = supabase.table("history").select("id").eq("id", search_id).execute()
-                        if history_check.data:
-                            insert_data["history_id"] = search_id
-                        else:
-                            print(f"Warning: No history record found for search_id {search_id}, inserting without history_id")
-                    except Exception as he:
-                        print(f"Error checking history table: {he}")
-                    
-                    result = supabase.table("candidates").insert(insert_data).execute()
-                    
-                    if result.data:
-                        inserted_count += 1
-                        print(f"✅ Inserted candidate: {name} ({email})")
-                    else:
-                        print(f"❌ Failed to insert candidate: {name} ({email})")
-                        
-                except Exception as candidate_error:
-                    print(f"❌ Error processing individual candidate: {candidate_error}")
-                    print(f"Candidate data: {candidate}")
-                    continue
-            
-            print(f"✅ Successfully inserted {inserted_count} candidates")
-            
-            # Mark search as processed
-            supabase.table("search").update({"processed": True}).eq("id", search_id).execute()
-            print(f"✅ Marked search {search_id} as processed")
-
-        except Exception as e:
-            print(f"❌ Error in async processing: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Mark search as processed even if there's an error to prevent infinite loading
-            try:
-                supabase.table("search").update({"processed": True}).eq("id", search_id).execute()
-            except:
-                pass
-
-    try:
-        # Extract user from JWT
-        user = request.current_user
-        user_id = user["user_id"]
-
-        # Get search_id from query
-        search_id = request.args.get("search_id")
-        print(f"Loading route called with search_id: {search_id}")
-        
-        if not search_id:
-            return jsonify({"error": "search_id is required"}), 400
-
-        # Check if already processing or processed
-        # search_status = (
-        #     supabase.table("search")
-        #     .select("processed, status")
-        #     .eq("id", search_id)
-        #     .eq("user_id", user_id)
-        #     .single()
-        #     .execute()
-        # )
-        
-        # if search_status.data and search_status.data.get("processed"):
-        #     print(f"Search {search_id} already processed, skipping")
-        #     return jsonify({"message": "Already processed", "search_id": search_id}), 200
-
-        # Fetch JD, skills, and process_state
-        search_resp = (
-            supabase.table("search")
-            .select("job_description, key_skills, process_state")
-            .eq("id", search_id)
-            .eq("user_id", user_id)
-            .single()
-            .execute()
-        )
-
-        if not search_resp.data:
-            return jsonify({"error": "Search not found or unauthorized"}), 404
-
-        jd = search_resp.data.get("job_description")
-        skills = search_resp.data.get("key_skills")
-
-        # Decode process_state JSON
-        process_state_raw = search_resp.data.get("process_state")
-        try:
-            process_state = json.loads(process_state_raw) if process_state_raw else {}
-        except Exception as e:
-            print(f"Error decoding process_state JSON: {e}")
-            process_state = {}
-
-        resume_dict = process_state.get("resume_dict", {})
-        
-        if not resume_dict:
-            return jsonify({"error": "No resumes found to process"}), 400
-            
-        combined_resumes = "\n".join(resume_dict.values())
-        print(f"Processing {len(resume_dict)} resumes, combined length: {len(combined_resumes)}")
-
-        # Start background processing thread
-        thread = threading.Thread(
-            target=process_candidates_async,
-            args=(combined_resumes, jd, skills, search_id, user_id),
-        )
-        thread.daemon = True  # Make thread daemon so it doesn't prevent app shutdown
-        thread.start()
-
-        return jsonify({"message": "Processing started", "search_id": search_id}), 200
-
-    except Exception as e:
-        print(f"❌ Loading route error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": "Failed to trigger candidate processing"}), 500
-    
-
-@app.route("/api/check-processing", methods=["GET"])
-@jwt_required
-def check_processing_status():
-    """Check processing status with JWT authentication"""
-    # Get user info from JWT token
-    user = request.current_user
-    user_id = user['user_id']
-    
-    # Get search_id from query parameters
-    search_id = request.args.get('search_id')
-    if not search_id:
-        return jsonify({"error": "search_id parameter is required"}), 400
-
-    try:
-        print(f"Checking processing status for search_id: {search_id}, user_id: {user_id}")
-        
-        # Verify the search belongs to the current user (security check)
-        result = supabase.table("search").select("processed").eq("id", search_id).eq("user_id", user_id).single().execute()
-        
-        if not result.data:
-            return jsonify({"error": "Search not found or access denied"}), 404
-            
-        is_done = result.data.get("processed", False)
-        
-        print(f"Processing status for search {search_id}: {'Complete' if is_done else 'In Progress'}")
-
-        return jsonify({
-            "success": True,
-            "processed": is_done,
-            "search_id": search_id
-        })
-        
-    except Exception as e:
-        print(f"Check processing status error: {str(e)}")
-        return jsonify({"error": "Failed to check processing status"}), 500
 
 @app.route('/api/results', methods=["GET"])
 @jwt_required
