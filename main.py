@@ -454,14 +454,14 @@ def shortlist(search_id):
         # ✅ Extract, shortlist, update
         final_candidates = scrape(candidate_data)
         print(f"SCRAPED DATA {final_candidates}")
-        shortlisted_indices = shortlist_candidates(final_candidates, skills, require_all=True)
+        shortlisted_indices = shortlist_candidates(final_candidates, skills, require_all=False)
         print(f"SHORTLISTED DATA {shortlisted_indices}")
         
-        if not shortlisted_indices:  # nothing matched
-            return jsonify({
-                "success": False,
-                "message": "No candidates matched the required skills."
-            }), 200
+        # if not shortlisted_indices:  # nothing matched
+        #     return jsonify({
+        #         "success": False,
+        #         "message": "No candidates matched the required skills."
+        #     }), 200
         
         # ✅ Update the search entry
         supabase.table("search").update({
@@ -1371,7 +1371,7 @@ def get_liked_candidates():
 @app.route("/api/add-user", methods=["POST"])
 @jwt_required
 def add_user():
-    """Add a new user to the organization (Admin/Master only)"""
+    """Add a new user to the organisation (Admin/Master only)"""
     try:
         # Get current user info
         current_user = request.current_user
@@ -1447,7 +1447,7 @@ def add_user():
                 "email": email,
                 "name": name,
                 "role": role,
-                "org_id": current_user['org_id'],  # Same organization as current user
+                "org_id": current_user['org_id'],  # Same organisation as current user
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             
@@ -1502,7 +1502,7 @@ def get_user_profile():
     return jsonify({
         "name": user.get("name"),
         "email": user.get("email"),
-        "organization": user.get("organization"),
+        "organisation": user.get("organisation"),
         "creds": user.get("creds"),
         "id": user.get("id"),
         "role":user.get("role")
@@ -1667,7 +1667,7 @@ def deduct_credits(user_id,org_id, action_type, reference_id=None):
 
     # Deduct credits
     new_balance = user["creds"] - cost
-    supabase.table("organization").update({"creds": new_balance}).eq("id", org_id).execute()
+    supabase.table("organisation").update({"creds": new_balance}).eq("id", org_id).execute()
 
     # Log it
     supabase.table("credit_logs").insert({
