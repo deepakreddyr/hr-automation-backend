@@ -478,7 +478,7 @@ def shortlist(search_id):
             "search_name": search_name,
             "status":"process"
         }).eq("id", search_id).execute()
-        deduct_credits(user_id, "search", reference_id=None)
+        deduct_credits(user_id,org_id, "search", reference_id=None)
         return jsonify({"success":True})
 
 @app.route("/api/process/<int:search_id>", methods=["GET", "POST"]) 
@@ -757,7 +757,7 @@ def process_candidates(search_id):
         }).eq("id", search_id).execute()
         
         # Deduct credits
-        deduct_credits(user_id, "process_candidate", reference_id=None)
+        deduct_credits(user_id,org_id, "process_candidate", reference_id=None)
         
         return jsonify({
             "success": True,
@@ -1186,18 +1186,19 @@ def webhook():
     candidate_id = variableValues.get("candidate_id")
 
     # Lookup candidate to get user_id
-    candidate_res = supabase.table("candidates").select("id, search_id").eq("id", candidate_id).execute()
+    candidate_res = supabase.table("candidates").select("id, search_id, org_id").eq("id", candidate_id).execute()
     if not candidate_res.data:
         return jsonify({"error": "Candidate not found"}), 404
 
     search_id = candidate_res.data[0]["search_id"]
+    org_id = candidate_res.data[0]["org_id"]
 
     search_res = supabase.table("search").select("user_id").eq("id", search_id).execute()
     if not search_res.data:
         return jsonify({"error": "Search not found"}), 404
 
     user_id = search_res.data[0]["user_id"]   # <-- instead of session["user_id"]
-
+    
     customer = call.get("customer", {})
     name = customer.get("name", "")
     phone = int(customer.get("number", "")[-10:]) if customer.get("number") else None
@@ -1220,12 +1221,12 @@ def webhook():
     if status == "yes":
         call_status = "Re-schedule"
         add_call_data(transcript, summary, structuredData, call_status, success_eval, phone, durationMinutes, name, candidate_id=int(candidate_id))
-        deduct_credits(user_id, "rescheduled_call", reference_id=None)
+        deduct_credits(user_id,org_id, "rescheduled_call", reference_id=None)
 
     elif status == "no":
         call_status = "Called & Answered"
         add_call_data(transcript, summary, structuredData, call_status, success_eval, phone, durationMinutes, name, candidate_id=int(candidate_id))
-        deduct_credits(user_id, "ai_call", reference_id=None)
+        deduct_credits(user_id,org_id, "ai_call", reference_id=None)
 
     print(f"Transcript : {transcript}")
     print(f"Summary : {summary}")
@@ -1648,7 +1649,7 @@ def user_settings():
             return jsonify({"error": "Failed to update settings"}), 500
 
 
-def deduct_credits(user_id, action_type, reference_id=None):
+def deduct_credits(user_id,org_id, action_type, reference_id=None):
     credit_cost_map = {
         "search": 5,
         "process_candidate": 2,
@@ -1666,7 +1667,7 @@ def deduct_credits(user_id, action_type, reference_id=None):
 
     # Deduct credits
     new_balance = user["creds"] - cost
-    supabase.table("users").update({"creds": new_balance}).eq("id", user_id).execute()
+    supabase.table("organization").update({"creds": new_balance}).eq("id", org_id).execute()
 
     # Log it
     supabase.table("credit_logs").insert({
