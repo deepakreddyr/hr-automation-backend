@@ -2,7 +2,6 @@ import os
 import json
 from dotenv import load_dotenv
 from openai import OpenAI
-
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -132,32 +131,79 @@ def get_questions(jd):
 res = []
 prof = []
 
-def shortlist_candidates(candidates, required_skills, require_all=True):
-    if isinstance(required_skills, str):
-        required_skills = [skill.strip().lower() for skill in required_skills.split(",")]
-    else:
-        required_skills = [skill.strip().lower() for skill in required_skills]
+def shortlist_candidates(candidates, required_skills, noc, jd_text):
+    prompt = f"""
+        You are an expert technical recruiter.  
 
-    shortlisted_indices = []
+        ### Task
+        From the scraped candidate data, identify the **top {noc} candidates** that STRICTLY MATCH THE GIVEN KEY SKILLS and BEST MATCH THE GIVEN JOB DESCRIPTION.  
+        Each candidate entry is a list containing their name, experience, location, current role, education, key skills, and other details.  
 
-    for idx, candidate in enumerate(candidates):
-        # Handle both string and list candidate formats
-        if isinstance(candidate, str):
-            candidate_text = candidate.lower()
-        else:
-            candidate_text = " ".join(map(str, candidate)).lower()
+        ### Key Skills
+        {required_skills}
 
-        matched_skills = [skill for skill in required_skills if skill in candidate_text]
+        ### Job Description
+        {jd_text}
 
-        # Option A: Require all skills to match
-        if require_all and len(matched_skills) == len(required_skills):
-            shortlisted_indices.append(idx)  # use zero-based index
-        # Option B: Allow partial match (at least one skill)
-        elif not require_all and matched_skills:
-            shortlisted_indices.append(idx)
+        ### Scraped Candidate Data
+        {candidates}
 
-    return shortlisted_indices
+        ### Output Format
+        Return the result strictly as a **raw JSON array** of objects (no markdown, no code fences), each containing:
+        - "index": <0-based index of candidate in scraped_data>
+        - "name": <candidate's name>
+        - "email": <email if found, otherwise "N/A">
 
+        ### Rules
+        - Only return up to {noc} best matches.
+        - If fewer than {noc} good matches exist, return fewer.
+        - The output must be valid JSON, directly parsable with `json.loads()`.
+        - Do not include markdown, code fences, or any explanation outside the JSON.
+    """
+
+    try:
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
+            temperature=0.5,
+            max_output_tokens=2048,
+            top_p=1,
+        )
+
+        raw_output = response.output[0].content[0].text.strip()
+
+        if not raw_output:
+            print("❌ ERROR: Empty model output")
+            return []
+
+        # 🚀 Strip markdown code fences if present
+        if raw_output.startswith("```"):
+            raw_output = raw_output.strip("`")
+            if raw_output.lower().startswith("json"):
+                raw_output = raw_output[4:].strip()
+
+        try:
+            parsed_output = json.loads(raw_output)
+        except json.JSONDecodeError as e:
+            print("⚠️ WARNING: Output is not valid JSON")
+            print("🔎 Raw output:", raw_output)
+            print("Error:", e)
+            return []
+
+        # Normalize output
+        if isinstance(parsed_output, dict):
+            parsed_output = [parsed_output]
+
+        if not isinstance(parsed_output, list):
+            print("❌ ERROR: Parsed output is not a list")
+            return []
+
+        print("✅ Parsed JSON:", parsed_output)
+        return parsed_output
+
+    except Exception as e:
+        print("❌ ERROR generating candidates:", e)
+        return []
 
 def scrape(data):
     global res, prof
