@@ -5,10 +5,10 @@ from dotenv import load_dotenv
 import json
 
 load_dotenv()
-OPENAI_API_KEY=os.getenv("OPENAI_API_KEY")
+api_key=os.getenv("OPENAI_API_KEY")
 def get_candidate_details(data,jd1,skills):
     
-    client=OpenAI(api_key=OPENAI_API_KEY)
+    client=OpenAI(api_key=api_key)
 
     system_prompt = f"""
     Evaluate a batch of candidate resumes against a given job description (JD) to identify and shortlist qualified candidates. For each candidate, calculate a match score from 0 to 100 based on relevance to the JD. Only candidates with a score above 70 should be shortlisted. Provide output in structured JSON format for each candidate, with detailed fields for shortlisted ones and a rejection reason for others.
@@ -306,7 +306,7 @@ def scrape(data):
 from openai import OpenAI
 
 def get_questions(jd):
-    client = OpenAI()
+    client=OpenAI(api_key=api_key)
     prompt=f"""Generate HR-level interview questions from a provided job description to confirm a candidate's experience and qualifications. Focus on evaluating demonstrated work related to the key skills and experiences mentioned within the job description.\n\n[Frame questions based on the provided job description template.]\n\n# Steps\n\n1. Analyze the provided job description to extract key skills, experience, and attributes required for the role.\n2. Formulate questions aimed at confirming the candidate's direct experience and work related to these specific criteria from the job description.\n3. Ensure questions are specific to the job description details, yet open enough to evoke detailed responses.\n\n# Input\n\n- {jd}: A structured job description from which key skills, experiences, and qualifications will be identified.\n\n# Output Format\n\nThe output should be a structured list of HR-level interview questions.\n\n- Example Questions:\n  - \"Can you detail your experience working with {{key_skill_1}} as described in the job description?\"\n  - \"The job description mentions experience in {{key_area}}. Can you share a specific project in which you utilized these skills?\"\n  - \"Can you provide examples of how you have demonstrated {{required_attribute}} in previous roles?\"\n\n# Notes\n\n- Tailor questions to verify the candidate's past work and experience directly related to the job description provided.\n- The aim is to assess the candidate's specific capabilities aligning with the job requirements described. (Do not generate more than 3 questions and also make sure that the questions are shorter which will also have shorter answers)"""
     response = client.responses.create(
     model="gpt-4.1-nano",
