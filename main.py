@@ -454,7 +454,7 @@ def shortlist(search_id):
         # ✅ Extract, shortlist, update
         final_candidates = scrape(candidate_data)
         print(f"SCRAPED DATA {final_candidates}")
-        shortlisted_indices = shortlist_candidates(final_candidates, skills)
+        shortlisted_indices = shortlist_candidates(final_candidates, skills, require_all=True)
         print(f"SHORTLISTED DATA {shortlisted_indices}")
         
         if not shortlisted_indices:  # nothing matched
