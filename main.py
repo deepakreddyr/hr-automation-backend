@@ -457,11 +457,11 @@ def shortlist(search_id):
         shortlisted_indices = shortlist_candidates(final_candidates, skills, require_all=False)
         print(f"SHORTLISTED DATA {shortlisted_indices}")
         
-        # if not shortlisted_indices:  # nothing matched
-        #     return jsonify({
-        #         "success": False,
-        #         "message": "No candidates matched the required skills."
-        #     }), 200
+        if shortlisted_indices == []:  # nothing matched
+            return jsonify({
+                "success": False,
+                "message": "No candidates matched the required skills."
+            }), 200
         
         # ✅ Update the search entry
         supabase.table("search").update({
