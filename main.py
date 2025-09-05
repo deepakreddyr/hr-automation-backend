@@ -8,6 +8,7 @@ from flask import (
     Flask, render_template, request,
     redirect, url_for, jsonify, flash, make_response
 )
+from helpers import correct_shortlisted_indices
 from dashboard_data import (
     get_dashboard_data,
     get_creds_used,
@@ -215,7 +216,7 @@ def login():
             return jsonify({"success": False, "message": "Invalid email or password"}), 401
 
         # Fetch user record from DB
-        user_data = supabase.table("users").select("id, email, org_id").eq("email", email).execute()
+        user_data = supabase.table("users").select("id, email, org_id, role").eq("email", email).execute()
         if not user_data.data:
             return jsonify({"success": False, "message": "User not found in database"}), 404
 
@@ -242,7 +243,8 @@ def login():
             "refresh_token": refresh_token,
             "user": {
                 "id": user_id_str,
-                "email": user_email_str
+                "email": user_email_str,
+                "role": user_data.data[0]["role"]
             }
         })
 
@@ -356,142 +358,99 @@ def get_search_status(search_id):
     else:
         return jsonify({"error": "Search not found"}), 404
 
-@app.route("/api/create-search", methods=["POST"])
+@app.route("/api/shortlist", methods=["POST"])
+@app.route("/api/shortlist/<int:search_id>", methods=["POST"])  # Optional parameter
 @jwt_required
-def create_search():
-    """Create a new search with JWT authentication"""
-    try:
-        # Get user info from JWT token
-        user = request.current_user
-        user_id = user['user_id']
-        org_id = user.get('org_id') 
-
-        print(f"Creating search for user_id: {user_id}")
-        
-        # Create search record
-        
-
-        # Create history record
-        history_resp = supabase.table("history").insert({
-            "user_id": user_id,
-            "creds": 0
-        }).execute()
-        
-        if not history_resp.data:
-            print("❌ Failed to insert history")
-            return jsonify({"error": "Error inserting history"}), 500
-
-        history_id = history_resp.data[0]["id"]
-        print(f"Created history record with ID: {history_id}")
-        response = supabase.table("search").insert({
-            "user_id": user_id,
-            "history_id": history_id,
-            "org_id": org_id,
-            "processed": False,
-            "remote_work": False,
-            "contract_hiring": False,
-            "key_skills": "",
-            "job_role": "",
-            "raw_data": "",
-            "shortlisted_index": "[]",
-            "noc": 0,
-            "job_description": "",
-            "status": "shortlist"
-        }).execute()
-        if response.data:
-            search_id = response.data[0]["id"]
-            print(f"Created search record with ID: {search_id}")
-            
-            return jsonify({
-                "success": True,
-                "search_id": search_id,
-                "history_id": history_id
-            })
-        else:
-            return jsonify({"error": "Could not create search"}), 500
-            
-    except Exception as e:
-        print(f"Create search error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/shortlist/<int:search_id>", methods=["GET", "POST"])
-@jwt_required
-def shortlist(search_id):
+def shortlist(search_id=None):
     user = request.current_user
-    user_id = user['user_id']
-    org_id = user.get('org_id') 
+    user_id = user["user_id"]
+    org_id = user.get("org_id")
+    candidate_data = request.form.get("candidateData", "").strip()
+    skills = request.form.get("skills", "").strip()
+    job_role = request.form.get("jobRole", "").strip()
+    jd_file = request.files.get("jdFile")
+    noc = int(request.form.get("numCandidates", "0"))
+    search_name = request.form.get("searchName", "").strip()
+    
+    errors = []
+    if not candidate_data:
+        errors.append("Candidate data is required.")
+    if not skills:
+        errors.append("Required skills cannot be empty.")
+    if not job_role:
+        errors.append("Job role is required.")
+    if noc <= 0:
+        errors.append("Number of candidates must be greater than 0.")
+    if errors:
+        return jsonify(success=False, errors=errors), 400
 
-    if request.method == "POST":
-        candidate_data = request.form.get("candidateData", "").strip()
-        skills = request.form.get("skills", "").strip()
-        job_role = request.form.get("jobRole", "").strip()
-        jd_file = request.files.get("jdFile")
-        noc = int(request.form.get("numCandidates", "0"))
-        search_name = request.form.get("searchName","").strip()
-        errors = []
-        if not candidate_data:
-            errors.append("Candidate data is required.")
-        if not skills:
-            errors.append("Required skills cannot be empty.")
-        if not job_role:
-            errors.append("Job role is required.")
-        if noc <= 0:
-            errors.append("Number of candidates must be greater than 0.")
+    # Extract JD text from uploaded PDF
+    jd_text = ""
+    if jd_file and jd_file.filename.endswith(".pdf"):
+        try:
+            doc = fitz.open(stream=jd_file.read(), filetype="pdf")
+            jd_text = "\n".join([page.get_text() for page in doc])
+        except Exception as e:
+            return jsonify(success=False, error=f"Error reading JD PDF: {e}"), 500
 
-        if errors:
-            return jsonify(success=False, errors=errors), 400
+    # Process shortlisting before database insert
+    final_candidates = scrape(candidate_data)
+    shortlisted_indices = shortlist_candidates(final_candidates, skills, noc, jd_text)
+    corrected_shortlist = correct_shortlisted_indices(shortlisted_indices, final_candidates)
+    
+    if corrected_shortlist == []:  # nothing matched        
+        return jsonify({
+            "success": False,
+            "message": "No candidates matched the required skills.",
+            "search_id": search_id
+        }), 200
 
-        # ✅ Extract JD text from uploaded PDF
-        jd_text = ""
-        if jd_file and jd_file.filename.endswith(".pdf"):
-            try:
-                doc = fitz.open(stream=jd_file.read(), filetype="pdf")
-                jd_text = "\n".join([page.get_text() for page in doc])
-            except Exception as e:
-                return jsonify(success=False, error=f"Error reading JD PDF: {e}"), 500
+    # Single database insert with all final data
+    search_resp = supabase.table("search").insert({
+        "user_id": user_id,
+        "org_id": org_id,
+        "processed": False,  # Already processed
+        "remote_work": False,
+        "contract_hiring": False,
+        "key_skills": skills,
+        "job_role": job_role,
+        "raw_data": candidate_data,
+        "shortlisted_index": json.dumps(corrected_shortlist),  # Final shortlist data
+        "noc": noc,
+        "job_description": jd_text,
+        "status": "process",
+        "search_name": search_name,
+    }).execute()
 
-        # ✅ Extract, shortlist, update
-        final_candidates = scrape(candidate_data)
-        print(f"SCRAPED DATA {final_candidates}")
-        shortlisted_indices = shortlist_candidates(final_candidates, skills, require_all=False)
-        print(f"SHORTLISTED DATA {shortlisted_indices}")
-        
-        if shortlisted_indices == []:  # nothing matched
-            return jsonify({
-                "success": False,
-                "message": "No candidates matched the required skills."
-            }), 200
-        
-        # ✅ Update the search entry
-        supabase.table("search").update({
-            "raw_data": candidate_data,
-            "key_skills": skills,
-            "job_role": job_role,
-            "user_id": user_id,
-            "shortlisted_index": json.dumps(shortlisted_indices),
-            "processed": True,
-            # "remote_work": False,
-            "contract_hiring": False,
-            "noc": noc,
-            "job_description": jd_text,
-            "search_name": search_name,
-            "status":"process"
-        }).eq("id", search_id).execute()
-        deduct_credits(user_id,org_id, "search", reference_id=None)
-        return jsonify({"success":True})
+    if not search_resp.data:
+        return jsonify({"error": "Error inserting search"}), 500
+
+    search_id = search_resp.data[0]["id"]
+    
+    # Deduct credits after successful processing
+    deduct_credits(user_id, org_id, "search", reference_id=search_id)
+
+    return jsonify({
+        "success": True,
+        "search_id": search_id,
+        "shortlist": corrected_shortlist
+    })
 
 @app.route("/api/process/<int:search_id>", methods=["GET", "POST"]) 
 @jwt_required 
-def process(search_id):     
+def process(search_id):
     user = request.current_user     
     user_id = user["user_id"]      
 
     # === Load search ===     
-    result = supabase.table("search").select("shortlisted_index, process_state, job_description, key_skills").eq("id", search_id).single().execute()     
+    result = supabase.table("search").select(
+        "shortlisted_index, process_state, job_description, key_skills"
+    ).eq("id", search_id).single().execute()     
+
     if not result.data:         
         return jsonify(success=False, error="Search not found"), 404      
 
+    # Load shortlisted data (now full JSON, not just indices)
     shortlisted = result.data.get("shortlisted_index") or []     
     if isinstance(shortlisted, str):         
         shortlisted = json.loads(shortlisted or "[]")      
@@ -500,7 +459,6 @@ def process(search_id):
     jd = result.data.get("job_description")     
     skills = result.data.get("key_skills")      
 
-    # Ensure process_state is always a dict     
     if isinstance(process_state, str):         
         try:             
             process_state = json.loads(process_state or "{}")         
@@ -509,10 +467,12 @@ def process(search_id):
 
     submitted = len(process_state.get("resume_dict", {}))     
     target = len(shortlisted)     
-    candidate_index = shortlisted[submitted] if submitted < target else None     
+
+    # ✅ Instead of index only, get candidate object
+    candidate = shortlisted[submitted] if submitted < target else None     
     is_last = (submitted == target - 1)      
 
-    # === POST (submit resume) ===     
+    # === POST submission ===
     if request.method == "POST":         
         resume_text = request.form.get("resumeText", "").strip()         
         hiring_company = request.form.get("hiringCompany", "").strip()         
@@ -526,7 +486,6 @@ def process(search_id):
         errors = []         
         if not resume_text:             
             errors.append("Resume text is required.")         
-        # Only validate these once (first candidate)         
         if "right_fields" not in process_state:             
             if not hiring_company: errors.append("Hiring Company is required.")             
             if not company_location: errors.append("Company Location is required.")             
@@ -536,12 +495,13 @@ def process(search_id):
         if errors:             
             return jsonify(success=False, errors=errors), 400          
 
-        # === Update resume_dict ===         
-        resume_dict = process_state.get("resume_dict", {})         
-        resume_dict[f"candidate_{candidate_index}"] = resume_text         
-        process_state["resume_dict"] = resume_dict          
+        # === Save resume ===         
+        resume_dict = process_state.get("resume_dict", {})
+        resume_dict[f"candidate_{candidate['index']}"] = resume_text
+        process_state["resume_dict"] = resume_dict
+         
 
-        # === Set right_fields once ===         
+        # === Set right_fields ===         
         if "right_fields" not in process_state:             
             process_state["right_fields"] = {                 
                 "hiringCompany": hiring_company,                 
@@ -551,7 +511,6 @@ def process(search_id):
                 "remoteWork": remote_work,                 
                 "contractH": contract_h,             
             }             
-            # also update search table             
             supabase.table("search").update({                 
                 "rc_name": hiring_company,                 
                 "company_location": company_location,                 
@@ -562,61 +521,57 @@ def process(search_id):
                 "user_id": user_id             
             }).eq("id", search_id).execute()          
 
-        # === Save custom question if final ===         
         if submitted + 1 == target and custom_question:             
             process_state["custom_question"] = custom_question             
             supabase.table("search").update({                 
                 "custom_question": custom_question             
             }).eq("id", search_id).execute()          
 
-        # === Persist process_state ===         
         supabase.table("search").update({             
             "process_state": json.dumps(process_state)         
         }).eq("id", search_id).execute()          
 
-        submitted = len(resume_dict)                  
-        
-        # === If this is the final submission, start processing ===         
+        submitted = len(resume_dict)         
+
+        # === Final submission ===
         if submitted == target:
-            # Set processing status immediately
             supabase.table("search").update({
                 "status": "processing",
                 "processed": False
             }).eq("id", search_id).execute()
             
-            # Return loading state to frontend
             return jsonify({
                 "success": True,
                 "submitted": submitted,
                 "target": target,
-                "candidateIndex": candidate_index,
+                "candidate": candidate,  # ✅ full candidate object
                 "isLast": True,
                 "right_fields": process_state["right_fields"],
                 "next": False,
-                "processing": True,  # Signal to show loading
+                "processing": True,
                 "search_id": search_id
             })
 
-        # Next candidate (not final)         
-        next_index = shortlisted[submitted]         
+        # Next candidate
+        next_candidate = shortlisted[submitted] if submitted < target else None         
         return jsonify({             
             "success": True,             
             "submitted": submitted,             
             "target": target,             
-            "candidateIndex": next_index,             
+            "candidate": next_candidate,  # ✅ send full object
             "isLast": (submitted == target - 1),             
             "right_fields": process_state["right_fields"],             
             "next": True         
         })      
-
-    # === GET (initial load) ===     
+    
+    # === GET (initial load) ===
     return jsonify({         
         "success": True,         
         "submitted": submitted,         
         "target": target,         
-        "candidateIndex": candidate_index,         
+        "candidate": candidate,  # ✅ send full object
         "isLast": is_last,         
-        "shortlisted_indices": shortlisted,         
+        "shortlisted": shortlisted,  # ✅ full list
         "right_fields": process_state.get("right_fields", {}),         
         "next": True     
     })
