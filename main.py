@@ -112,25 +112,29 @@ for var in required_vars:
         raise ValueError(f"Required environment variable {var} is not set")
 
 supabase: Client = create_client(url, anon_key)
+supabase_admin: Client = create_client(url, service_key) 
 
 # ─── JWT Helper Functions ─────────────────────────────────────────────────────
 
-def generate_access_token(user_id, email):
+def generate_access_token(user_id, email, org_id):
     """Generate JWT access token"""
     payload = {
-        'user_id': str(user_id),  # Ensure user_id is a string
-        'email': str(email),      # Ensure email is a string
+        'user_id': str(user_id),  
+        'email': str(email),      
+        'org_id': str(org_id),    # ✅ Add org_id
         'exp': datetime.now(timezone.utc) + JWT_ACCESS_TOKEN_EXPIRES,
         'iat': datetime.now(timezone.utc),
         'type': 'access'
     }
     return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
-def generate_refresh_token(user_id, email):
+
+def generate_refresh_token(user_id, email, org_id):
     """Generate JWT refresh token"""
     payload = {
-        'user_id': str(user_id),  # Ensure user_id is a string
-        'email': str(email),      # Ensure email is a string
+        'user_id': str(user_id),
+        'email': str(email),
+        'org_id': str(org_id),    # ✅ Add org_id
         'exp': datetime.now(timezone.utc) + JWT_REFRESH_TOKEN_EXPIRES,
         'iat': datetime.now(timezone.utc),
         'type': 'refresh'
@@ -174,7 +178,8 @@ def get_current_user():
     
     return {
         'user_id': payload.get('user_id'),
-        'email': payload.get('email')
+        'email': payload.get('email'),
+        'org_id': payload.get('org_id')
     }
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -210,22 +215,23 @@ def login():
             return jsonify({"success": False, "message": "Invalid email or password"}), 401
 
         # Fetch user record from DB
-        user_data = supabase.table("users").select("id, email").eq("email", email).execute()
+        user_data = supabase.table("users").select("id, email, org_id").eq("email", email).execute()
         if not user_data.data:
             return jsonify({"success": False, "message": "User not found in database"}), 404
 
         user_id = user_data.data[0]["id"]
         user_email = user_data.data[0]["email"]
-
+        org_id= user_data.data[0]["org_id"]
         # Ensure user_id and email are strings and add debug logging
         user_id_str = str(user_id)
         user_email_str = str(user_email)
-        
-        print(f"Creating JWT tokens for user_id: {user_id_str} ({type(user_id)}), email: {user_email_str}")
+        org_id_str = str(org_id)
+
+        print(f"Creating JWT tokens for user_id: {user_id_str} ({type(user_id)}), email: {user_email_str}, org_id: {org_id_str}")
 
         # Generate JWT tokens
-        access_token = generate_access_token(user_id_str, user_email_str)
-        refresh_token = generate_refresh_token(user_id_str, user_email_str)
+        access_token = generate_access_token(user_id_str, user_email_str,org_id_str)
+        refresh_token = generate_refresh_token(user_id_str, user_email_str,org_id_str)
         
         print(f"JWT tokens generated for user: {user_email}")
         
@@ -264,7 +270,7 @@ def refresh_token():
             return jsonify({"success": False, "message": "Invalid token type"}), 401
         
         # Generate new access token
-        new_access_token = generate_access_token(payload['user_id'], payload['email'])
+        new_access_token = generate_access_token(payload['user_id'], payload['email'], payload['org_id'])
         
         return jsonify({
             "success": True,
@@ -308,8 +314,6 @@ def reset_password():
         except Exception as e:
             flash(f"❌ Error: {str(e)}", "danger")
     return render_template("reset_password.html")
-
-TRANSCRIPT={}
 
 @app.route("/404")
 def error():
@@ -360,7 +364,8 @@ def create_search():
         # Get user info from JWT token
         user = request.current_user
         user_id = user['user_id']
-        
+        org_id = user.get('org_id') 
+
         print(f"Creating search for user_id: {user_id}")
         
         # Create search record
@@ -381,6 +386,7 @@ def create_search():
         response = supabase.table("search").insert({
             "user_id": user_id,
             "history_id": history_id,
+            "org_id": org_id,
             "processed": False,
             "remote_work": False,
             "contract_hiring": False,
@@ -414,6 +420,8 @@ def create_search():
 def shortlist(search_id):
     user = request.current_user
     user_id = user['user_id']
+    org_id = user.get('org_id') 
+
     if request.method == "POST":
         candidate_data = request.form.get("candidateData", "").strip()
         skills = request.form.get("skills", "").strip()
@@ -620,7 +628,8 @@ def process(search_id):
 def process_candidates(search_id):
     user = request.current_user
     user_id = user["user_id"]
-    
+    org_id = user.get('org_id')
+
     try:
         # Get search data
         result = supabase.table("search").select("process_state, job_description, key_skills").eq("id", search_id).single().execute()
@@ -717,7 +726,8 @@ def process_candidates(search_id):
                     "user_id": user_id,
                     "total_experience": candidate.get("total_experience", ""),
                     "relevant_work_experience": candidate.get("relevant_experience", ""),
-                    "match_score": match_score
+                    "match_score": match_score,
+                    "org_id": org_id
                 }
                 
                 # Add history_id if it exists
@@ -961,6 +971,8 @@ def mark_final_selects():
 @app.route("/api/final-selects", methods=["GET", "POST"])
 @jwt_required
 def final_selects():
+    user = request.current_user
+    org_id = user.get('org_id')
     if request.method == "POST":
         data = request.get_json()
 
@@ -979,9 +991,9 @@ def final_selects():
         return jsonify({"status": "success"})
 
     # GET request — return all candidates marked as final selects
-    response = supabase.table("candidates").select("*").eq("hiring_status", True).execute()
+    response = supabase.table("candidates").select("*").eq("hiring_status", True).eq("org_id", org_id).execute()
     data = response.data or []
-
+    print(data)
     final_candidates = []
     for person in data:
         final_candidates.append({
@@ -1308,10 +1320,10 @@ def dashboard():
     try:
         user = request.current_user
         user_id = user['user_id']
-
+        org_id = user['org_id']
         print(f"Dashboard access granted for user_id: {user_id}")
 
-        dashboard_data = get_dashboard_data(user_id)
+        dashboard_data = get_dashboard_data(org_id)
 
         # Add extra simple lookups
         dashboard_data["creds_used"] = get_creds_used(user_id)
@@ -1345,15 +1357,134 @@ def get_searches():
 @app.route("/api/get-liked-candiates", methods=["GET"])
 @jwt_required
 def get_liked_candidates():
-    
+    user = request.current_user
+    org_id = user.get('org_id')
     response = supabase.table("candidates") \
         .select("*") \
-        .eq("liked", True) \
+        .eq("liked", True).eq("org_id",org_id) \
         .execute()
 
     candidates = response.data or []
     return jsonify(candidates)
 
+@app.route("/api/add-user", methods=["POST"])
+@jwt_required
+def add_user():
+    """Add a new user to the organization (Admin/Master only)"""
+    try:
+        # Get current user info
+        current_user = request.current_user
+        if not current_user:
+            return jsonify({"success": False, "message": "Authentication required"}), 401
+        
+        # Check if current user has admin privileges
+        current_user_data = supabase.table("users").select("role").eq("id", current_user['user_id']).execute()
+        if not current_user_data.data:
+            return jsonify({"success": False, "message": "User not found"}), 404
+        
+        current_user_role = current_user_data.data[0]["role"]
+        if current_user_role not in ['admin', 'master']:
+            return jsonify({"success": False, "message": "Insufficient permissions"}), 403
+        
+        # Get form data
+        data = request.get_json()
+        name = data.get("name", "").strip()
+        email = data.get("email", "").lower().strip()
+        password = data.get("password", "")
+        role = data.get("role", "").strip()
+        
+        # Validate input
+        if not all([name, email, password, role]):
+            return jsonify({"success": False, "message": "All fields are required"}), 400
+        
+        if role not in ['user', 'admin']:
+            return jsonify({"success": False, "message": "Invalid role"}), 400
+        
+        if len(password) < 6:
+            return jsonify({"success": False, "message": "Password must be at least 6 characters"}), 400
+        
+        # Check if user already exists in our database
+        existing_user = supabase.table("users").select("id").eq("email", email).execute()
+        if existing_user.data:
+            return jsonify({"success": False, "message": "User with this email already exists"}), 409
+        
+        # Create user in Supabase Auth using admin client
+        try:
+            # Use the admin client for creating users
+            auth_response = supabase_admin.auth.admin.create_user({
+                "email": email,
+                "password": password,
+                "email_confirm": True,  # Auto-confirm email
+                "user_metadata": {
+                    "name": name,
+                    "role": role
+                }
+            })
+            
+            if not auth_response or not auth_response.user:
+                return jsonify({"success": False, "message": "Failed to create user in authentication system"}), 500
+                
+            supabase_user_id = auth_response.user.id
+            
+        except Exception as auth_error:
+            print(f"Supabase Auth error: {str(auth_error)}")
+            # Handle specific Supabase errors
+            error_message = str(auth_error)
+            if "email_address_not_authorized" in error_message:
+                return jsonify({"success": False, "message": "Email domain not authorized"}), 400
+            elif "email_address_invalid" in error_message:
+                return jsonify({"success": False, "message": "Invalid email address"}), 400
+            elif "password" in error_message.lower():
+                return jsonify({"success": False, "message": "Password does not meet requirements"}), 400
+            else:
+                return jsonify({"success": False, "message": "Failed to create user authentication"}), 500
+        
+        # Insert user into users table
+        try:
+            user_insert_data = {
+                # "id": supabase_user_id,
+                "email": email,
+                "name": name,
+                "role": role,
+                "org_id": current_user['org_id'],  # Same organization as current user
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            
+            insert_result = supabase.table("users").insert(user_insert_data).execute()
+            
+            if not insert_result.data:
+                # If database insert fails, clean up the auth user
+                try:
+                    supabase_admin.auth.admin.delete_user(supabase_user_id)
+                except Exception as cleanup_error:
+                    print(f"Failed to cleanup auth user: {cleanup_error}")
+                return jsonify({"success": False, "message": "Failed to create user record"}), 500
+            
+        except Exception as db_error:
+            print(f"Database error: {str(db_error)}")
+            # Clean up auth user if database insert fails
+            try:
+                supabase_admin.auth.admin.delete_user(supabase_user_id)
+            except Exception as cleanup_error:
+                print(f"Failed to cleanup auth user: {cleanup_error}")
+            return jsonify({"success": False, "message": "Failed to create user record"}), 500
+        
+        return jsonify({
+            "success": True,
+            "message": f"User {name} created successfully",
+            "user": {
+                "id": supabase_user_id,
+                "name": name,
+                "email": email,
+                "role": role,
+                "org_id": current_user['org_id']
+            }
+        })
+        
+    except Exception as e:
+        print(f"Add user error: {str(e)}")
+        return jsonify({"success": False, "message": "Failed to create user"}), 500
+    
 @app.route("/api/user-profile", methods=["GET"])
 @jwt_required
 def get_user_profile():
@@ -1372,7 +1503,8 @@ def get_user_profile():
         "email": user.get("email"),
         "organization": user.get("organization"),
         "creds": user.get("creds"),
-        "id": user.get("id")
+        "id": user.get("id"),
+        "role":user.get("role")
     })
 
 @app.route("/api/billing-data", methods=["GET"])

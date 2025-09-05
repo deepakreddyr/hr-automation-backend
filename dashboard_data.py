@@ -42,14 +42,14 @@ from datetime import date, timedelta
 
 today = date.today()
 
-def get_dashboard_data(user_id):
+def get_dashboard_data(org_id):
     today = date.today()
 
     # Today’s stats
     searches = (
         supabase.from_("search")
         .select("id", count="exact")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .gte("created_at", f"{today}T00:00:00")
         .lte("created_at", f"{today}T23:59:59")
         .execute()
@@ -59,7 +59,7 @@ def get_dashboard_data(user_id):
     candidates = (
         supabase.from_("candidates")
         .select("id", count="exact")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .gte("created_at", f"{today}T00:00:00")
         .lte("created_at", f"{today}T23:59:59")
         .execute()
@@ -69,7 +69,7 @@ def get_dashboard_data(user_id):
     calls = (
         supabase.from_("calls")
         .select("id", count="exact")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .gte("created_at", f"{today}T00:00:00")
         .lte("created_at", f"{today}T23:59:59")
         .execute()
@@ -79,7 +79,7 @@ def get_dashboard_data(user_id):
     joinees = (
         supabase.from_("candidates")
         .select("id", count="exact")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .eq("join_status", True)
         .execute()
     )
@@ -91,7 +91,7 @@ def get_dashboard_data(user_id):
     weekly_calls = (
         supabase.from_("calls")
         .select("created_at")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .gte("created_at", f"{start_date}T00:00:00")
         .execute()
         .data
@@ -101,7 +101,7 @@ def get_dashboard_data(user_id):
     weekly_searches = (
         supabase.from_("search")
         .select("created_at")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .gte("created_at", f"{start_date}T00:00:00")
         .execute()
         .data
@@ -111,7 +111,7 @@ def get_dashboard_data(user_id):
     weekly_joinees = (
         supabase.from_("candidates")
         .select("created_at, join_status")
-        .eq("user_id", user_id)
+        .eq("org_id", org_id)
         .gte("created_at", f"{start_date}T00:00:00")
         .execute()
         .data
