@@ -127,3 +127,47 @@ def get_questions(jd):
     except Exception as e:
         print("❌ ERROR generating questions:", e)
         return []
+
+
+res = []
+prof = []
+
+def shortlist_candidates(candidates, required_skills):
+    if isinstance(required_skills, str):
+        required_skills = [skill.strip().lower() for skill in required_skills.split(",")]
+    else:
+        required_skills = [skill.strip().lower() for skill in required_skills]
+
+    shortlisted_indices = []
+
+    for idx, candidate in enumerate(candidates):
+        candidate_text = " ".join([str(x) for x in candidate]).lower()
+        matched_skills = [skill for skill in required_skills if skill in candidate_text]
+
+        if len(matched_skills) == len(required_skills):
+            shortlisted_indices.append(idx+1)
+
+    return shortlisted_indices
+
+def scrape(data):
+    global res, prof
+    res = []  # Reset global list
+
+    for i in data.split("\n"):
+        res.append(i.strip())
+
+    sliced_data = res[46:len(res)-34]
+
+    final = []
+    temp = []
+
+    for i in sliced_data:
+        if "active" in i.lower():
+            final.append(temp)
+            temp = []
+        elif i in ["View phone number", "Call candidate", "Verified phone & email", "\n", ""]:
+            continue
+        else:
+            temp.append(i)
+
+    return final
