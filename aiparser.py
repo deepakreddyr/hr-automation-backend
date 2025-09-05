@@ -132,7 +132,7 @@ def get_questions(jd):
 res = []
 prof = []
 
-def shortlist_candidates(candidates, required_skills):
+def shortlist_candidates(candidates, required_skills, require_all=True):
     if isinstance(required_skills, str):
         required_skills = [skill.strip().lower() for skill in required_skills.split(",")]
     else:
@@ -141,13 +141,23 @@ def shortlist_candidates(candidates, required_skills):
     shortlisted_indices = []
 
     for idx, candidate in enumerate(candidates):
-        candidate_text = " ".join([str(x) for x in candidate]).lower()
+        # Handle both string and list candidate formats
+        if isinstance(candidate, str):
+            candidate_text = candidate.lower()
+        else:
+            candidate_text = " ".join(map(str, candidate)).lower()
+
         matched_skills = [skill for skill in required_skills if skill in candidate_text]
 
-        if len(matched_skills) == len(required_skills):
-            shortlisted_indices.append(idx+1)
+        # Option A: Require all skills to match
+        if require_all and len(matched_skills) == len(required_skills):
+            shortlisted_indices.append(idx)  # use zero-based index
+        # Option B: Allow partial match (at least one skill)
+        elif not require_all and matched_skills:
+            shortlisted_indices.append(idx)
 
     return shortlisted_indices
+
 
 def scrape(data):
     global res, prof
