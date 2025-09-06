@@ -49,9 +49,11 @@ def get_candidate_details(data, jd1, skills):
      - `reason_to_reject`
 
 5. **The number of candidates resume results should strictly be equal to the number of candidates resume input(IMPORTANT).**
+
 # Output Format
 
-Produce the output in JSON format for each resume:
+Return a valid JSON array containing objects for each resume. Do not include any explanatory text, warnings, or content outside the JSON array.
+
 - **If match_score > 70 for a resume**:
   {{
     "match_score": [value],
@@ -66,29 +68,68 @@ Produce the output in JSON format for each resume:
     "total_experience": "[Years and Months]",
     "relevant_experience": "[Years and Months]"
   }}
+
+- **If match_score ≤ 70 for a resume**:
+  {{
+    "match_score": [value],
+    "reason_to_reject": "[Reason]"
+  }}
+
+Example output structure:
+[
+  {{
+    "match_score": 85,
+    "name": "John Doe",
+    "phone": "+91-9876543210",
+    "email": "john.doe@example.com",
+    "job_summary": "Experienced data scientist with 3 years in ML",
+    "experience_in_skills": {{
+      "Python": "3 years 0 months",
+      "Machine Learning": "2 years 6 months"
+    }},
+    "total_experience": "3 years 2 months",
+    "relevant_experience": "2 years 8 months"
+  }},
+  {{
+    "match_score": 65,
+    "reason_to_reject": "Lacks required Python experience"
+  }}
+]
+
+Respond with ONLY the JSON array, no additional text.
 """
+
     try:
         response = client.responses.create(
             model="gpt-4.1-mini",
             input=f"{system_prompt}\n\nCandidate Resumes:\n{data}",
-            temperature=0.5,
-            max_output_tokens=2048,
+            temperature=0.3,  # Reduced for more consistent output
+            max_output_tokens=4096,  # Increased for larger batches
             top_p=1,
         )
 
         raw_output = response.output[0].content[0].text.strip()
-
+        
         if not raw_output:
             print("❌ ERROR: Empty model output")
             return []
 
-        try:
-            parsed_output = json.loads(raw_output)
-        except json.JSONDecodeError:
-            print("⚠️ WARNING: Output is not valid JSON")
-            print("🔎 Raw output:", raw_output)
+        # Clean the output to extract JSON
+        cleaned_output = clean_ai_response(raw_output)
+        
+        if not cleaned_output:
+            print("❌ ERROR: Could not extract valid JSON from response")
+            print("🔎 Raw output:", raw_output[:500] + "..." if len(raw_output) > 500 else raw_output)
             return []
 
+        try:
+            parsed_output = json.loads(cleaned_output)
+        except json.JSONDecodeError as json_error:
+            print(f"❌ JSON Parse Error: {json_error}")
+            print("🔎 Cleaned output:", cleaned_output[:300] + "..." if len(cleaned_output) > 300 else cleaned_output)
+            return []
+
+        # Ensure output is a list
         if isinstance(parsed_output, dict):
             parsed_output = [parsed_output]
 
@@ -96,13 +137,103 @@ Produce the output in JSON format for each resume:
             print("❌ ERROR: Parsed output is not a list")
             return []
 
-        print("✅ Parsed JSON:", parsed_output)
-        return parsed_output
+        # Validate each candidate object
+        valid_candidates = []
+        for candidate in parsed_output:
+            if validate_candidate_structure(candidate):
+                valid_candidates.append(candidate)
+            else:
+                print(f"⚠️ WARNING: Invalid candidate structure: {candidate}")
+
+        print(f"✅ Successfully parsed {len(valid_candidates)} valid candidates")
+        return valid_candidates
 
     except Exception as e:
-        print("❌ ERROR calling OpenAI:", e)
+        print(f"❌ ERROR calling AI model: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
+
+def clean_ai_response(raw_output):
+    """
+    Extract valid JSON from AI response, handling various formatting issues
+    """
+    try:
+        # Remove any leading/trailing whitespace
+        cleaned = raw_output.strip()
+        
+        # Remove common prefixes that might interfere with JSON parsing
+        prefixes_to_remove = [
+            "⚠️ WARNING: Output is not valid JSON",
+            "🔎 Raw output:",
+            "Here's the JSON output:",
+            "```json",
+            "```"
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+        
+        # Remove trailing markdown or extra content
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+        
+        # Find JSON array bounds
+        start_idx = cleaned.find('[')
+        end_idx = cleaned.rfind(']')
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            json_content = cleaned[start_idx:end_idx + 1]
+        else:
+            # Try to find a single JSON object and wrap it in array
+            start_idx = cleaned.find('{')
+            end_idx = cleaned.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_content = '[' + cleaned[start_idx:end_idx + 1] + ']'
+            else:
+                return None
+        
+        # Basic JSON validation - try to parse
+        json.loads(json_content)
+        return json_content
+        
+    except Exception as e:
+        print(f"❌ Error cleaning AI response: {e}")
+        return None
+
+
+def validate_candidate_structure(candidate):
+    """
+    Validate that candidate object has required structure
+    """
+    if not isinstance(candidate, dict):
+        return False
+    
+    # Check for required match_score
+    if 'match_score' not in candidate:
+        return False
+    
+    try:
+        match_score = float(candidate['match_score'])
+        if not (0 <= match_score <= 100):
+            return False
+    except (ValueError, TypeError):
+        return False
+    
+    # For high-scoring candidates, check required fields
+    if match_score > 70:
+        required_fields = ['name', 'email']
+        for field in required_fields:
+            if field not in candidate or not candidate[field]:
+                return False
+    else:
+        # For rejected candidates, check for rejection reason
+        if 'reason_to_reject' not in candidate or not candidate['reason_to_reject']:
+            return False
+    
+    return True
 
 # ----------------------------
 # HR Interview Questions
