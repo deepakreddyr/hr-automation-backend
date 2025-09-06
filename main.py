@@ -684,7 +684,7 @@ def process_candidates(search_id):
                     "match_score": match_score,
                     "org_id": org_id
                 }
-                
+                print(insert_data)
                 # Add history_id if it exists
                 try:
                     history_check = supabase.table("history").select("id").eq("id", search_id).execute()
