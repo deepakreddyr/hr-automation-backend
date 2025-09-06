@@ -1603,7 +1603,183 @@ def user_settings():
             print(f"Error updating settings: {str(e)}")
             return jsonify({"error": "Failed to update settings"}), 500
 
+@app.route("/api/create-task", methods=["POST"])
+@jwt_required
+def create_task():
+    try:
+        user = request.current_user
+        user_id = user["user_id"]
+        org_id = user.get("org_id")
 
+        body = request.get_json()
+        
+        # Handle assignedTo field properly
+        assigned_to = body.get("assignedTo")
+        if assigned_to and assigned_to.strip():
+            try:
+                assigned_to = int(assigned_to)
+            except (ValueError, TypeError):
+                return jsonify({"success": False, "error": "Invalid assigned user ID format"}), 400
+        else:
+            return jsonify({"success": False, "error": "Please select a user to assign the task to"}), 400
+        
+        # Handle deadline - set to end of day to avoid constraint issues
+        deadline_str = body.get("deadline")
+        if not deadline_str:
+            return jsonify({"success": False, "error": "Deadline is required"}), 400
+        
+        # If it's just a date (YYYY-MM-DD), convert to end of day
+        if len(deadline_str) == 10:  # Format: YYYY-MM-DD
+            deadline = deadline_str + "T23:59:59.999Z"  # End of day
+        else:
+            deadline = deadline_str
+        
+        new_task = {
+            "title": body.get("title"),
+            "priority": body.get("priority", "Medium"),
+            "deadline": deadline,
+            "company_name": body.get("companyName"),
+            "job_location": body.get("jobLocation"),
+            "manager_email": body.get("managerEmail"),
+            "job_role": body.get("jobRole"),
+            "openings": body.get("openings", 1),
+            "ctc_range": body.get("ctcRange"),
+            "time_to_hire": body.get("timeToHire"),
+            "skills": body.get("skills", []),
+            "jd_link": body.get("jdLink"),
+            "notes": body.get("notes"),
+            "assigned_to_user_id": assigned_to,
+            "assigned_by_user_id": user_id,
+            "org_id": org_id,
+        }
+
+        response = supabase.table("tasks").insert(new_task).execute()
+        if hasattr(response, 'error') and response.error:
+            return jsonify({"success": False, "error": str(response.error)}), 400
+
+        return jsonify({"success": True, "task": response.data[0]}), 201
+
+    except Exception as e:
+        print(f"Create task error: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/tasks/history", methods=["GET"])
+@jwt_required
+def get_history_data():
+    """
+    Get all tasks assigned to the current user (for inbox/history view)
+    """
+    try:
+        user = request.current_user
+        user_id = user.get("user_id")
+
+        if not user_id:
+            return jsonify({"success": False, "error": "User ID not found"}), 400
+
+        # Fetch tasks assigned to current user with all necessary fields
+        response = (
+            supabase.table("tasks")
+            .select("*")
+            .eq("assigned_by_user_id", user_id)
+            .is_("deleted_at", None)
+            .order("created_at", desc=True)  # Most recent first
+            .execute()
+        )
+
+        if hasattr(response, 'error') and response.error:
+            return jsonify({"success": False, "error": str(response.error)}), 400
+
+        tasks = response.data or []
+        # Add default status if not present
+        for task in tasks:
+            if not task.get('status'):
+                task['status'] = 'Pending'
+
+        return jsonify({
+            "success": True, 
+            "tasks": tasks,
+            "count": len(tasks)
+        }), 200
+
+    except Exception as e:
+        print(f"Error fetching inbox tasks: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/tasks/inbox", methods=["GET"])
+@jwt_required
+def get_inbox_tasks():
+    """
+    Get all tasks assigned to the current user (for inbox/history view)
+    """
+    try:
+        user = request.current_user
+        user_id = user.get("user_id")
+
+        if not user_id:
+            return jsonify({"success": False, "error": "User ID not found"}), 400
+
+        # Fetch tasks assigned to current user with all necessary fields
+        response = (
+            supabase.table("tasks")
+            .select("*")
+            .eq("assigned_to_user_id", user_id)
+            .is_("deleted_at", None)
+            .order("created_at", desc=True)  # Most recent first
+            .execute()
+        )
+
+        if hasattr(response, 'error') and response.error:
+            return jsonify({"success": False, "error": str(response.error)}), 400
+
+        tasks = response.data or []
+        print(tasks)
+        # Add default status if not present
+        for task in tasks:
+            if not task.get('status'):
+                task['status'] = 'Pending'
+
+        return jsonify({
+            "success": True, 
+            "tasks": tasks,
+            "count": len(tasks)
+        }), 200
+
+    except Exception as e:
+        print(f"Error fetching inbox tasks: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/get-users", methods=["GET"])
+@jwt_required
+def get_org_users():
+    try:
+        user = request.current_user
+        org_id = user.get("org_id")
+        
+        if not org_id:
+            return jsonify({"success": False, "error": "Organization not found"}), 400
+        
+        # Fetch all users from the same organization
+        response = supabase.table("users").select("id, name, email, role").eq("org_id", org_id).eq("role","user").execute()
+        
+        # Check if there's an error in the response
+        if hasattr(response, 'error') and response.error:
+            return jsonify({"success": False, "error": str(response.error)}), 400
+        
+        # Alternative error check if the above doesn't work
+        if not response.data:
+            return jsonify({"success": False, "error": "No users found or database error"}), 400
+        
+        # Filter out the current user (optional - they might want to assign to themselves)
+        # users = [user_data for user_data in response.data if user_data["user_id"] != user["user_id"]]
+        users = response.data
+        
+        return jsonify({"success": True, "users": users}), 200
+        
+    except Exception as e:
+        print(f"Error fetching users: {str(e)}")  # For debugging
+        return jsonify({"success": False, "error": str(e)}), 500
+    
 def deduct_credits(user_id,org_id, action_type, reference_id=None):
     credit_cost_map = {
         "search": 5,
