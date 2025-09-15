@@ -1614,10 +1614,11 @@ def create_task():
         body = request.get_json()
         
         # Handle assignedTo field properly
-        assigned_to = body.get("assignedTo")
-        if assigned_to and assigned_to.strip():
+        assigned_to_id = body.get("assignedTo")        
+
+        if assigned_to_id and assigned_to_id.strip():
             try:
-                assigned_to = int(assigned_to)
+                assigned_to_id = int(assigned_to_id)
             except (ValueError, TypeError):
                 return jsonify({"success": False, "error": "Invalid assigned user ID format"}), 400
         else:
@@ -1634,6 +1635,9 @@ def create_task():
         else:
             deadline = deadline_str
         
+        assignor=supabase.table("users").select("name").eq("id",user_id).execute().data[0]["name"]
+        assignee=supabase.table("users").select("name").eq("id",assigned_to_id).execute().data[0]["name"]
+
         new_task = {
             "title": body.get("title"),
             "priority": body.get("priority", "Medium"),
@@ -1648,8 +1652,10 @@ def create_task():
             "skills": body.get("skills", []),
             "jd_link": body.get("jdLink"),
             "notes": body.get("notes"),
-            "assigned_to_user_id": assigned_to,
+            "assigned_to_user_id": assigned_to_id,
             "assigned_by_user_id": user_id,
+            "assignee": assignee,
+            "assignor": assignor,
             "org_id": org_id,
         }
 
