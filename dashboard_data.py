@@ -15,17 +15,21 @@ today_date = datetime.now().date()
 
 # ---------- Small helpers ----------
 
-def get_creds_used(user_id):
+def get_total_credits_used(user_id):
+    # Fetch all creds for the user
     response = (
-        supabase.from_("history")
-        .select("creds")
+        supabase.from_("credit_logs")
+        .select("deductions")
         .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .single()
         .execute()
     )
-    return response.data.get("creds", 0) if response.data else 0
+    if not response.data:
+        return 0
+
+    # Sum all credits
+    total_credits = sum(item.get("deductions", 0) for item in response.data)
+    return total_credits
+
 
 
 def get_user_name(user_id):

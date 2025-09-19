@@ -11,17 +11,16 @@ from flask import (
 from helpers import correct_shortlisted_indices
 from dashboard_data import (
     get_dashboard_data,
-    get_creds_used,
+    get_total_credits_used,
     get_user_name
 )
+from generate_embeddings import MemoryOptimizedResumeExtractor
+# from filter_candidates import FlaskJDBasedResumeFilter, JobDescription, CandidateMatch
 import fitz  
 from flask_cors import CORS
 import requests
-from aiparser import shortlist_candidates,scrape,get_candidate_details,get_questions
+from aiparser import shortlist_candidates,scrape,get_candidate_details,get_questions,get_embedding
 from supabase import create_client, Client
-import threading
-import ast
-import secrets
 
 # ─── App & Config ─────────────────────────────────────────────────────────────
 
@@ -114,7 +113,16 @@ for var in required_vars:
 
 supabase: Client = create_client(url, anon_key)
 supabase_admin: Client = create_client(url, service_key) 
+extractor = MemoryOptimizedResumeExtractor(
+    max_workers=3,
+    batch_size=50,
+    max_memory_mb=512
+)
 
+# resume_filter = FlaskJDBasedResumeFilter(
+#     supabase_url=os.getenv("SUPABASE_URL"),
+#     supabase_key=os.getenv("SUPABASE_ANON_KEY")
+# )
 # ─── JWT Helper Functions ─────────────────────────────────────────────────────
 
 def generate_access_token(user_id, email, org_id):
@@ -420,6 +428,7 @@ def shortlist(search_id=None):
         "job_description": jd_text,
         "status": "process",
         "search_name": search_name,
+        "search_type": "Naukri"
     }).execute()
 
     if not search_resp.data:
@@ -435,6 +444,146 @@ def shortlist(search_id=None):
         "search_id": search_id,
         "shortlist": corrected_shortlist
     })
+
+@app.route("/api/shortlist/simple", methods=["POST"])
+@jwt_required
+def create_shortlist():
+    try:
+        user = request.current_user
+        user_id = user["user_id"]
+        org_id = user.get("org_id")
+
+        # === Get form fields ===
+        search_name = request.form.get("searchName")
+        job_role = request.form.get("jobRole")
+        skills = request.form.get("skills")
+        num_candidates = request.form.get("numCandidates")
+        resume_link = request.form.get("resumeLink")
+        jd_file = request.files.get("jdFile")
+
+        # Extra fields from wizard
+        hiring_company = request.form.get("hiringCompany")
+        hr_company = request.form.get("hrCompany")
+        company_location = request.form.get("companyLocation")
+        notice_period = request.form.get("noticePeriod")
+        remote_work = request.form.get("remoteWork", "false").lower() == "true"
+        contract_hiring = request.form.get("contractHiring", "false").lower() == "true"
+
+        if not search_name or not job_role or not skills or not resume_link or not user_id:
+            return jsonify({"success": False, "message": "Missing required fields"}), 400
+
+        # === STEP 1: Extract JD text ===
+        jd_text = ""
+        if jd_file and jd_file.filename.endswith(".pdf"):
+            doc = fitz.open(stream=jd_file.read(), filetype="pdf")
+            jd_text = "\n".join([page.get_text() for page in doc])
+
+        # === STEP 2: Insert search record ===
+        response = supabase.table("search").insert({
+            "user_id": user_id,
+            "org_id": org_id,
+            "search_name": search_name,
+            "job_role": job_role,
+            "key_skills": skills,
+            "job_description": jd_text,
+            "resume_link": resume_link,
+            "noc": int(num_candidates) if num_candidates else None,
+            "rc_name": hiring_company,
+            "hc_name": hr_company,
+            "company_location": company_location,
+            "notice_period": notice_period,
+            "remote_work": remote_work,
+            "contract_hiring": contract_hiring,
+            "status": "results",
+            "processed": True,
+            "search_type": "Simple"
+        }).execute()
+        search_id = response.data[0]["id"]
+
+        # === STEP 3: Extract resumes ===
+        raw_resumes = []
+        for batch in extractor.process_drive_spreadsheet_optimized(resume_link, user_id, search_id):
+            raw_resumes.extend(batch)
+
+        if not raw_resumes:
+            return jsonify({"success": False, "message": "No resumes processed"}), 500
+
+        # === STEP 4: Embedding-based shortlist ===
+        jd_embedding = get_embedding(jd_text)
+
+        matches = supabase.rpc("match_resumes", {
+            "query_embedding": jd_embedding,
+            "similarity_threshold": 0.60,
+            "match_count": int(num_candidates) if num_candidates else 5,
+            "input_search_id": search_id
+        }).execute()
+
+        shortlisted = matches.data or []
+        shortlisted_texts = [c["resume_text"] for c in shortlisted if "resume_text" in c]
+
+        if not shortlisted_texts:
+            return jsonify({"success": False, "message": "No candidates shortlisted"}), 200
+
+        # === STEP 5: Pass shortlisted resumes into AI scoring ===
+        ai_results = get_candidate_details(shortlisted_texts, jd_text, skills)
+
+        if not ai_results:
+            return jsonify({"success": False, "message": "No candidates after AI scoring"}), 200
+
+        # === STEP 6: Insert AI-enriched candidates into table ===
+        inserts = []
+        for cand in ai_results:
+            insert_obj = {
+                "user_id": user_id,
+                "org_id": org_id,
+                "search_id": search_id,
+                "match_score": cand.get("match_score"),
+            }
+
+            if cand.get("match_score", 0) > 70:
+                # --- sanitize phone number ---
+                phone_raw = cand.get("phone")
+                phone_clean = None
+                if phone_raw:
+                    import re
+                    digits = re.sub(r"\D", "", str(phone_raw))
+                    if digits:
+                        try:
+                            phone_clean = int(digits)
+                        except Exception:
+                            phone_clean = None
+
+                insert_obj.update({
+                    "name": cand.get("name"),
+                    "phone": phone_clean,  # stored as bigint-safe
+                    "email": cand.get("email"),
+                    "summary": cand.get("job_summary"),
+                    "skills_experience": cand.get("experience_in_skills"),
+                    "total_experience": cand.get("total_experience"),
+                    "relevant_work_experience": cand.get("relevant_experience"),
+                })
+            else:
+                insert_obj["summary"] = cand.get("reason_to_reject")
+
+            inserts.append(insert_obj)
+
+        if inserts:
+            supabase.table("candidates").insert(inserts).execute()
+            deduct_credits(user_id, org_id, "search", reference_id=search_id)
+            deduct_credits(user_id,org_id, "process_candidate", reference_id=None)
+
+        return jsonify({
+            "success": True,
+            "message": "Shortlist created successfully",
+            "search_id": search_id,
+            "resumes_processed": len(raw_resumes),
+            "shortlisted_candidates": ai_results,
+        }), 200
+
+    except Exception as e:
+        print(f"Error in /api/shortlist/simple: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
 
 @app.route("/api/process/<int:search_id>", methods=["GET", "POST"]) 
 @jwt_required 
@@ -1274,7 +1423,7 @@ def api_transcript(candidate_id):
 @jwt_required
 def dashboard():
     try:
-        user = request.current_user
+        user = request.current_user 
         user_id = user['user_id']
         org_id = user['org_id']
         print(f"Dashboard access granted for user_id: {user_id}")
@@ -1282,7 +1431,7 @@ def dashboard():
         dashboard_data = get_dashboard_data(org_id)
 
         # Add extra simple lookups
-        dashboard_data["creds_used"] = get_creds_used(user_id)
+        dashboard_data["creds_used"] = get_total_credits_used(user_id)
         dashboard_data["user_name"] = get_user_name(user_id)
 
         return make_response(jsonify(dashboard_data))

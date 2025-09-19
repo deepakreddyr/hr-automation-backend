@@ -2,6 +2,8 @@ import os
 import json
 from dotenv import load_dotenv
 from openai import OpenAI
+import openai
+
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -11,10 +13,17 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-
+# --- Function to get JD embedding ---
+def get_embedding(text: str):
+    response = openai.embeddings.create(
+        model="text-embedding-3-small",
+        input=text
+    )
+    return response.data[0].embedding
 # ----------------------------
 # Candidate Evaluation
 # ----------------------------
+
 def get_candidate_details(data, jd1, skills):
     system_prompt = f"""
     Evaluate a batch of candidate resumes against a given job description (JD) to identify and shortlist qualified candidates. For each candidate, calculate a match score from 0 to 100 based on relevance to the JD. Only candidates with a score above 70 should be shortlisted. Provide output in structured JSON format for each candidate, with detailed fields for shortlisted ones and a rejection reason for others.
@@ -109,7 +118,7 @@ Respond with ONLY the JSON array, no additional text.
         )
 
         raw_output = response.output[0].content[0].text.strip()
-        
+        print(raw_output)
         if not raw_output:
             print("❌ ERROR: Empty model output")
             return []
