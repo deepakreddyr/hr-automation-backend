@@ -359,3 +359,374 @@ def get_questions(jd):
 
 
 provide complete updated code DO NOT CHANGE THE PROMPT
+
+text-embedding-3-small
+
+
+#!/usr/bin/env python3
+"""
+Complete usage examples for the Memory Optimized Resume Extractor
+"""
+
+import os
+from your_resume_extractor_file import MemoryOptimizedResumeExtractor  # Import your class
+
+# =============================================================================
+# METHOD 1: Basic Usage with Environment Variables
+# =============================================================================
+
+def basic_usage():
+    """
+    Simplest way to use the extractor - credentials from environment variables
+    """
+    # Set environment variables first (in terminal or .env file):
+    # export OPENAI_API_KEY="sk-your-key-here"
+    # export SUPABASE_URL="https://your-project.supabase.co"
+    # export SUPABASE_KEY="your-supabase-key"
+    
+    # Initialize extractor (will auto-load from environment)
+    extractor = MemoryOptimizedResumeExtractor(
+        max_workers=2,
+        batch_size=25,
+        max_memory_mb=256
+    )
+    
+    # Your Google Drive spreadsheet link
+    drive_url = "https://drive.google.com/file/d/your-spreadsheet-id/view?usp=sharing"
+    
+    # Process all resumes
+    results = []
+    for batch_results in extractor.process_drive_spreadsheet_optimized(drive_url):
+        results.extend(batch_results)
+        print(f"Processed batch of {len(batch_results)} resumes")
+    
+    print(f"Total processed: {len(results)} resumes")
+    return results
+
+# =============================================================================
+# METHOD 2: Pass Credentials Explicitly  
+# =============================================================================
+
+def explicit_credentials():
+    """
+    Pass API credentials directly to the constructor
+    """
+    extractor = MemoryOptimizedResumeExtractor(
+        max_workers=2,
+        batch_size=25, 
+        max_memory_mb=256,
+        openai_api_key="sk-your-openai-key-here",
+        supabase_url="https://your-project.supabase.co",
+        supabase_key="your-supabase-key-here"
+    )
+    
+    drive_url = "https://drive.google.com/file/d/your-spreadsheet-id/view?usp=sharing"
+    
+    # Process with progress callback and save results
+    def my_progress_callback(total_processed, batch_number, stats):
+        print(f"Progress: {total_processed} processed, {stats['db_inserted']} saved to DB")
+    
+    all_results = []
+    for batch_results in extractor.process_drive_spreadsheet_optimized(
+        drive_url, 
+        output_file="results.csv",
+        progress_callback=my_progress_callback
+    ):
+        all_results.extend(batch_results)
+    
+    return all_results
+
+# =============================================================================
+# METHOD 3: Production Usage with Error Handling
+# =============================================================================
+
+def production_usage():
+    """
+    Production-ready usage with comprehensive error handling
+    """
+    try:
+        # Initialize with production settings
+        extractor = MemoryOptimizedResumeExtractor(
+            max_workers=3,          # Slightly more for production
+            batch_size=50,          # Larger batches for efficiency 
+            max_memory_mb=512       # More memory if available
+        )
+        
+        # Multiple Google Drive links (if you have multiple spreadsheets)
+        drive_urls = [
+            "https://drive.google.com/file/d/spreadsheet1-id/view",
+            "https://drive.google.com/file/d/spreadsheet2-id/view",
+            # Add more URLs as needed
+        ]
+        
+        all_results = []
+        
+        for i, drive_url in enumerate(drive_urls, 1):
+            print(f"\n=== Processing Spreadsheet {i} of {len(drive_urls)} ===")
+            
+            try:
+                output_file = f"results_batch_{i}.csv"
+                
+                for batch_results in extractor.process_drive_spreadsheet_optimized(
+                    drive_url,
+                    output_file=output_file
+                ):
+                    all_results.extend(batch_results)
+                    
+                    # Log successful batch
+                    successful = sum(1 for r in batch_results if r['db_inserted'])
+                    print(f"Batch complete: {successful}/{len(batch_results)} saved to database")
+                
+            except Exception as e:
+                print(f"Error processing spreadsheet {i}: {e}")
+                continue  # Continue with next spreadsheet
+        
+        # Final summary
+        total_processed = len(all_results)
+        successful_db_inserts = sum(1 for r in all_results if r['db_inserted'])
+        
+        print(f"\n=== FINAL SUMMARY ===")
+        print(f"Total Resumes Processed: {total_processed}")
+        print(f"Successfully Saved to Database: {successful_db_inserts}")
+        print(f"Success Rate: {(successful_db_inserts/total_processed*100):.1f}%")
+        
+        return all_results
+        
+    except Exception as e:
+        print(f"Critical error in production usage: {e}")
+        return []
+
+# =============================================================================
+# METHOD 4: Custom Processing with Manual Control
+# =============================================================================
+
+def custom_processing():
+    """
+    Manual control over processing for custom workflows
+    """
+    extractor = MemoryOptimizedResumeExtractor()
+    
+    # Read spreadsheet manually first
+    drive_url = "https://drive.google.com/file/d/your-id/view"
+    
+    # Process in custom batches
+    for chunk_df in extractor.read_spreadsheet_in_chunks(drive_url, chunk_size=100):
+        print(f"Got chunk with {len(chunk_df)} rows")
+        
+        # Custom filtering (e.g., only process certain candidates)
+        filtered_df = chunk_df[chunk_df['status'] == 'active']  # Your custom filter
+        
+        # Prepare batch data
+        batch_data = []
+        last_column = filtered_df.columns[-1]  # Resume URL column
+        
+        for index, row in filtered_df.iterrows():
+            batch_data.append({
+                'row_number': index,
+                'resume_url': row[last_column],
+                'original_row': row.to_dict()
+            })
+        
+        # Process the filtered batch
+        if batch_data:
+            results = extractor.process_batch(batch_data)
+            
+            # Custom post-processing
+            for result in results:
+                if result['db_inserted']:
+                    print(f"✅ {result['name']} - Resume processed and saved")
+                else:
+                    print(f"❌ {result['name']} - Failed: {result['status']}")
+
+# =============================================================================
+# METHOD 5: Simple Script for One-Time Processing
+# =============================================================================
+
+def simple_script():
+    """
+    Simple script for one-time processing of a single spreadsheet
+    """
+    # Your credentials
+    OPENAI_API_KEY = "sk-your-key-here"
+    SUPABASE_URL = "https://your-project.supabase.co"
+    SUPABASE_KEY = "your-key-here"
+    DRIVE_URL = "https://drive.google.com/file/d/your-spreadsheet/view"
+    
+    # Create extractor
+    extractor = MemoryOptimizedResumeExtractor(
+        openai_api_key=OPENAI_API_KEY,
+        supabase_url=SUPABASE_URL, 
+        supabase_key=SUPABASE_KEY
+    )
+    
+    # Process all resumes
+    print("Starting resume processing...")
+    
+    total_count = 0
+    success_count = 0
+    
+    for batch_results in extractor.process_drive_spreadsheet_optimized(DRIVE_URL):
+        for result in batch_results:
+            total_count += 1
+            if result['db_inserted']:
+                success_count += 1
+                print(f"✅ Processed: {result['name']}")
+            else:
+                print(f"❌ Failed: {result['name']} - {result['status']}")
+    
+    print(f"\nDone! {success_count}/{total_count} resumes successfully processed")
+
+# =============================================================================
+# METHOD 6: Using with Command Line Arguments
+# =============================================================================
+
+def command_line_usage():
+    """
+    Usage with command line arguments
+    """
+    import sys
+    
+    if len(sys.argv) < 2:
+        print("Usage: python script.py <google_drive_url>")
+        print("Example: python script.py 'https://drive.google.com/file/d/abc123/view'")
+        return
+    
+    drive_url = sys.argv[1]
+    
+    extractor = MemoryOptimizedResumeExtractor()
+    
+    print(f"Processing spreadsheet: {drive_url}")
+    
+    for batch_results in extractor.process_drive_spreadsheet_optimized(
+        drive_url,
+        output_file="resume_results.csv"
+    ):
+        print(f"Processed {len(batch_results)} resumes in this batch")
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+if __name__ == "__main__":
+    print("Choose a method to run:")
+    print("1. Basic usage (environment variables)")
+    print("2. Explicit credentials") 
+    print("3. Production usage")
+    print("4. Custom processing")
+    print("5. Simple script")
+    print("6. Command line usage")
+    
+    choice = input("Enter choice (1-6): ")
+    
+    if choice == "1":
+        basic_usage()
+    elif choice == "2":
+        explicit_credentials()
+    elif choice == "3":
+        production_usage()
+    elif choice == "4":
+        custom_processing()
+    elif choice == "5":
+        simple_script()
+    elif choice == "6":
+        command_line_usage()
+    else:
+        print("Invalid choice")
+
+# =============================================================================
+# ENVIRONMENT SETUP (.env file example)
+# =============================================================================
+
+"""
+Create a .env file in your project directory with:
+
+OPENAI_API_KEY=sk-your-openai-key-here
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_KEY=your-supabase-anon-key
+
+Then load it with:
+from dotenv import load_dotenv
+load_dotenv()
+"""
+
+# =============================================================================
+# INSTALLATION COMMANDS
+# =============================================================================
+
+"""
+Run these commands to install required packages:
+
+pip install pandas requests PyPDF2 python-docx openpyxl xlrd psutil openai supabase python-dotenv
+
+Or create requirements.txt:
+pandas>=1.5.0
+requests>=2.28.0
+PyPDF2>=3.0.0
+python-docx>=0.8.11
+openpyxl>=3.0.0
+xlrd>=2.0.0
+psutil>=5.9.0
+openai>=1.0.0
+supabase>=1.0.0
+python-dotenv>=1.0.0
+
+Then: pip install -r requirements.txt
+"""
+
+
+
+
+annotated-types==0.7.0
+anyio==4.9.0
+blinker==1.9.0
+certifi==2025.7.14
+charset-normalizer==3.4.2
+click==8.2.1
+deprecation==2.1.0
+distro==1.9.0
+Flask==3.1.1
+flask-cors==6.0.1
+gotrue==2.12.3
+h11==0.16.0
+h2==4.2.0
+hpack==4.1.0
+httpcore==1.0.9
+httpx==0.28.1
+hyperframe==6.1.0
+idna==3.10
+itsdangerous==2.2.0
+Jinja2==3.1.6
+jiter==0.10.0
+MarkupSafe==3.0.2
+openai==1.97.0
+packaging==25.0
+postgrest==1.1.1
+pydantic==2.11.7
+pydantic_core==2.33.2
+PyJWT==2.10.1
+PyMuPDF==1.26.3
+python-dateutil==2.9.0.post0
+python-dotenv==1.1.1
+realtime==2.5.3
+requests==2.32.4
+six==1.17.0
+sniffio==1.3.1
+storage3==0.12.0
+StrEnum==0.4.15
+supabase==2.16.0
+supafunc==0.10.1
+tqdm==4.67.1
+typing-inspection==0.4.1
+typing_extensions==4.14.1
+urllib3==2.5.0
+websockets==15.0.1
+Werkzeug==3.1.3
+psutil==5.9.8
+PyPDF2==3.0.1
+python-docx==1.1.2
+sentence-transformers==2.2.2
+scikit-learn==1.5.2
+numpy==1.26.4
+scipy==1.14.1
+torch==2.3.1
+transformers==4.43.3
