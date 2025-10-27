@@ -310,24 +310,9 @@ def logout():
     # You could implement a token blacklist here if needed
     return jsonify({"success": True, "message": "Logged out successfully"})
 
-# ------------------------------
-# Password reset
-# ------------------------------
-
-@app.route("/reset-password", methods=["GET", "POST"])
-def reset_password():
-    if request.method == "POST":
-        email = request.form.get("email", "").lower()
-        try:
-            supabase.auth.reset_password_for_email(email)
-            flash("✅ Password reset email sent. Check your inbox.", "success")
-        except Exception as e:
-            flash(f"❌ Error: {str(e)}", "danger")
-    return render_template("reset_password.html")
-
 @app.route("/404")
 def error():
-    return render_template("404.html")
+    return jsonify({"message": "Unknown API"}), 404
 
 # ─── Utility: JWT Authentication Decorator ────────────────────────────────────
 
@@ -367,19 +352,38 @@ def get_search_status(search_id):
         return jsonify({"error": "Search not found"}), 404
 
 @app.route("/api/shortlist", methods=["POST"])
-@app.route("/api/shortlist/<int:search_id>", methods=["POST"])  # Optional parameter
 @jwt_required
-def shortlist(search_id=None):
+def shortlist():
+    """Create new shortlist or update existing one"""
     user = request.current_user
     user_id = user["user_id"]
     org_id = user.get("org_id")
-    candidate_data = request.form.get("candidateData", "").strip()
-    skills = request.form.get("skills", "").strip()
-    job_role = request.form.get("jobRole", "").strip()
-    jd_file = request.files.get("jdFile")
-    noc = int(request.form.get("numCandidates", "0"))
-    search_name = request.form.get("searchName", "").strip()
     
+    # Extract form data
+    candidate_data = request.form.get("candidateData", "").strip()
+    skills = request.form.get("requiredSkills", "").strip()
+    job_role = request.form.get("jobRole", "").strip()
+    search_name = request.form.get("searchName", "").strip()
+    jd_file = request.files.get("jdFile")
+    noc = int(request.form.get("numberOfCandidates", "0"))
+    
+    # Get search_id from form data (if updating)
+    search_id = request.form.get("search_id")
+    if search_id:
+        try:
+            search_id = int(search_id)
+        except (ValueError, TypeError):
+            search_id = None
+    
+    # New fields
+    hiring_company = request.form.get("hiringCompany", "").strip()
+    company_location = request.form.get("companyLocation", "").strip()
+    hr_company = request.form.get("hrCompany", "").strip()
+    notice_period = request.form.get("noticePeriod", "").strip()
+    remote_work_available = request.form.get("remoteWorkAvailable", "").strip()
+    contract_hiring = request.form.get("contractHiring", "").strip()
+    
+    # Validation
     errors = []
     if not candidate_data:
         errors.append("Candidate data is required.")
@@ -387,8 +391,27 @@ def shortlist(search_id=None):
         errors.append("Required skills cannot be empty.")
     if not job_role:
         errors.append("Job role is required.")
+    if not search_name:
+        errors.append("Search name is required.")
     if noc <= 0:
         errors.append("Number of candidates must be greater than 0.")
+    if not jd_file or not jd_file.filename.endswith(".pdf"):
+        errors.append("Job Description PDF is required.")
+    
+    # Validate new fields
+    if not hiring_company:
+        errors.append("Hiring company is required.")
+    if not company_location:
+        errors.append("Company location is required.")
+    if not hr_company:
+        errors.append("HR company is required.")
+    if not notice_period:
+        errors.append("Notice period is required.")
+    if not remote_work_available:
+        errors.append("Remote work available is required.")
+    if not contract_hiring:
+        errors.append("Contract hiring is required.")
+    
     if errors:
         return jsonify(success=False, errors=errors), 400
 
@@ -401,7 +424,7 @@ def shortlist(search_id=None):
         except Exception as e:
             return jsonify(success=False, error=f"Error reading JD PDF: {e}"), 500
 
-    # Process shortlisting before database insert
+    # Process shortlisting before database operation
     final_candidates = scrape(candidate_data)
     shortlisted_indices = shortlist_candidates(final_candidates, skills, noc, jd_text)
     corrected_shortlist = correct_shortlisted_indices(shortlisted_indices, final_candidates)
@@ -413,37 +436,80 @@ def shortlist(search_id=None):
             "search_id": search_id
         }), 200
 
-    # Single database insert with all final data
-    search_resp = supabase.table("search").insert({
+    # Convert remote_work and contract_hiring to boolean for database
+    remote_work_bool = remote_work_available.lower() in ['yes', 'hybrid']
+    contract_hiring_bool = contract_hiring.lower() == 'yes'
+
+    # Prepare data for database operation
+    search_data = {
         "user_id": user_id,
         "org_id": org_id,
-        "processed": False,  # Already processed
-        "remote_work": False,
-        "contract_hiring": False,
+        "processed": False,
+        "remote_work": remote_work_bool,
+        "contract_hiring": contract_hiring_bool,
         "key_skills": skills,
         "job_role": job_role,
         "raw_data": candidate_data,
-        "shortlisted_index": json.dumps(corrected_shortlist),  # Final shortlist data
+        "shortlisted_index": json.dumps(corrected_shortlist),
         "noc": noc,
         "job_description": jd_text,
         "status": "process",
         "search_name": search_name,
-        "search_type": "Naukri"
-    }).execute()
+        "search_type": "Naukri",
+        # New fields
+        "rc_name": hiring_company,
+        "company_location": company_location,
+        "hc_name": hr_company,
+        "notice_period": notice_period
+    }
 
-    if not search_resp.data:
-        return jsonify({"error": "Error inserting search"}), 500
+    try:
+        if search_id:
+            # Update existing search
+            # First check if search exists and belongs to user
+            existing_search = supabase.table("search").select("*").eq("id", search_id).eq("user_id", user_id).execute()
+            
+            if not existing_search.data:
+                return jsonify({
+                    "success": False,
+                    "message": "Search not found or access denied."
+                }), 404
+            
+            # Update the existing search
+            search_resp = supabase.table("search").update(search_data).eq("id", search_id).execute()
+            
+            if not search_resp.data:
+                return jsonify({"success": False, "error": "Error updating search"}), 500
+                
+            final_search_id = search_id
+            operation_message = "Shortlist updated successfully"
+            
+        else:
+            # Create new search
+            search_resp = supabase.table("search").insert(search_data).execute()
+            
+            if not search_resp.data:
+                return jsonify({"success": False, "error": "Error creating search"}), 500
+            
+            final_search_id = search_resp.data[0]["id"]
+            operation_message = "Shortlist created successfully"
+            
+            # Only deduct credits for new searches, not updates
+            deduct_credits(user_id, org_id, "search", reference_id=final_search_id)
 
-    search_id = search_resp.data[0]["id"]
-    
-    # Deduct credits after successful processing
-    deduct_credits(user_id, org_id, "search", reference_id=search_id)
-
-    return jsonify({
-        "success": True,
-        "search_id": search_id,
-        "shortlist": corrected_shortlist
-    })
+        return jsonify({
+            "success": True,
+            "message": operation_message,
+            "search_id": final_search_id,
+            "shortlist": corrected_shortlist
+        })
+        
+    except Exception as e:
+        print(f"Error in shortlist operation: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "An error occurred while processing your request."
+        }), 500
 
 @app.route("/api/shortlist/simple", methods=["POST"])
 @jwt_required
@@ -584,7 +650,6 @@ def create_shortlist():
         print(f"Error in /api/shortlist/simple: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-
 @app.route("/api/process/<int:search_id>", methods=["GET", "POST"]) 
 @jwt_required 
 def process(search_id):
@@ -623,23 +688,39 @@ def process(search_id):
 
     # === POST submission ===
     if request.method == "POST":         
-        resume_text = request.form.get("resumeText", "").strip()         
-        hiring_company = request.form.get("hiringCompany", "").strip()         
-        company_location = request.form.get("companyLocation", "").strip()         
-        hr_company = request.form.get("hrCompany", "").strip()         
-        notice_period = request.form.get("noticePeriod", "").strip()         
-        remote_work = request.form.get("remoteWork") == "on"         
-        contract_h = request.form.get("contractH") == "on"         
-        custom_question = request.form.get("customQuestion", "").strip()          
+        resume_text = request.form.get("resumeText", "").strip()
+        resume_file = request.files.get("resumeFile")
+        
+        # Extract text from file if provided
+        if resume_file:
+            try:
+                filename = resume_file.filename.lower()
+                
+                if filename.endswith('.pdf'):
+                    # Extract text from PDF using PyMuPDF (fitz)
+                    import fitz
+                    pdf_doc = fitz.open(stream=resume_file.read(), filetype="pdf")
+                    resume_text = "\n".join([page.get_text() for page in pdf_doc])
+                    pdf_doc.close()
+                    
+                elif filename.endswith('.txt'):
+                    # Read text file
+                    resume_text = resume_file.read().decode('utf-8')
+                    
+                elif filename.endswith('.csv'):
+                    # Read CSV file
+                    resume_text = resume_file.read().decode('utf-8')
+                    
+                else:
+                    return jsonify(success=False, errors=["Unsupported file format. Please upload PDF, TXT, or CSV."]), 400
+                    
+            except Exception as e:
+                return jsonify(success=False, errors=[f"Error reading file: {str(e)}"]), 500
 
+        # Validation
         errors = []         
         if not resume_text:             
-            errors.append("Resume text is required.")         
-        if "right_fields" not in process_state:             
-            if not hiring_company: errors.append("Hiring Company is required.")             
-            if not company_location: errors.append("Company Location is required.")             
-            if not hr_company: errors.append("HR Company is required.")             
-            if not notice_period: errors.append("Notice Period is required.")          
+            errors.append("Resume text or file is required.")         
 
         if errors:             
             return jsonify(success=False, errors=errors), 400          
@@ -648,34 +729,8 @@ def process(search_id):
         resume_dict = process_state.get("resume_dict", {})
         resume_dict[f"candidate_{candidate['index']}"] = resume_text
         process_state["resume_dict"] = resume_dict
-         
 
-        # === Set right_fields ===         
-        if "right_fields" not in process_state:             
-            process_state["right_fields"] = {                 
-                "hiringCompany": hiring_company,                 
-                "companyLocation": company_location,                 
-                "hrCompany": hr_company,                 
-                "noticePeriod": notice_period,                 
-                "remoteWork": remote_work,                 
-                "contractH": contract_h,             
-            }             
-            supabase.table("search").update({                 
-                "rc_name": hiring_company,                 
-                "company_location": company_location,                 
-                "hc_name": hr_company,                 
-                "notice_period": notice_period,                 
-                "remote_work": remote_work,                 
-                "contract_hiring": contract_h,                 
-                "user_id": user_id             
-            }).eq("id", search_id).execute()          
-
-        if submitted + 1 == target and custom_question:             
-            process_state["custom_question"] = custom_question             
-            supabase.table("search").update({                 
-                "custom_question": custom_question             
-            }).eq("id", search_id).execute()          
-
+        # === Update process state ===
         supabase.table("search").update({             
             "process_state": json.dumps(process_state)         
         }).eq("id", search_id).execute()          
@@ -695,7 +750,6 @@ def process(search_id):
                 "target": target,
                 "candidate": candidate,  # ✅ full candidate object
                 "isLast": True,
-                "right_fields": process_state["right_fields"],
                 "next": False,
                 "processing": True,
                 "search_id": search_id
@@ -709,11 +763,20 @@ def process(search_id):
             "target": target,             
             "candidate": next_candidate,  # ✅ send full object
             "isLast": (submitted == target - 1),             
-            "right_fields": process_state["right_fields"],             
             "next": True         
         })      
     
     # === GET (initial load) ===
+    # Load right_fields from search table (already saved in shortlist)
+    right_fields = {
+        "hiringCompany": result.data.get("hiring_company", ""),
+        "companyLocation": result.data.get("company_location", ""),
+        "hrCompany": result.data.get("hr_company", ""),
+        "noticePeriod": result.data.get("notice_period", ""),
+        "remoteWork": result.data.get("remote_work", False),
+        "contractHiring": result.data.get("contract_hiring", False),
+    }
+    
     return jsonify({         
         "success": True,         
         "submitted": submitted,         
@@ -721,10 +784,10 @@ def process(search_id):
         "candidate": candidate,  # ✅ send full object
         "isLast": is_last,         
         "shortlisted": shortlisted,  # ✅ full list
-        "right_fields": process_state.get("right_fields", {}),         
+        "shortlisted_indices": [c.get('index') for c in shortlisted if isinstance(c, dict)],  # ✅ for progress display
+        "right_fields": right_fields,         
         "next": True     
     })
-
 
 # New route to handle the actual processing (runs in background)
 @app.route("/api/process-candidates/<int:search_id>", methods=["POST"])
@@ -1860,6 +1923,41 @@ def get_history_data():
         print(f"Error fetching inbox tasks: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/get-search", methods=["GET"])
+@jwt_required
+def get_search_data():
+    """
+    Get all tasks assigned to the current user (for inbox/history view)
+    """
+    try:
+        user = request.current_user
+        user_id = user.get("user_id")
+        
+        if not user_id:
+            return jsonify({"success": False, "error": "User ID not found"}), 400
+
+        # Fetch tasks assigned to current user with all necessary fields
+        response = (
+            supabase.table("search")
+            .select("*")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        if hasattr(response, 'error') and response.error:
+            return jsonify({"success": False, "error": str(response.error)}), 400
+
+        searchs = response.data or []
+
+        return jsonify({
+            "success": True, 
+            "tasks": searchs,
+            "count": len(searchs)
+        }), 200
+
+    except Exception as e:
+        print(f"Error fetching inbox tasks: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route("/api/tasks/inbox", methods=["GET"])
 @jwt_required
 def get_inbox_tasks():
@@ -1869,7 +1967,7 @@ def get_inbox_tasks():
     try:
         user = request.current_user
         user_id = user.get("user_id")
-
+        
         if not user_id:
             return jsonify({"success": False, "error": "User ID not found"}), 400
 
@@ -1882,12 +1980,10 @@ def get_inbox_tasks():
             .order("created_at", desc=True)  # Most recent first
             .execute()
         )
-
         if hasattr(response, 'error') and response.error:
             return jsonify({"success": False, "error": str(response.error)}), 400
 
         tasks = response.data or []
-        print(tasks)
         # Add default status if not present
         for task in tasks:
             if not task.get('status'):
@@ -1902,8 +1998,7 @@ def get_inbox_tasks():
     except Exception as e:
         print(f"Error fetching inbox tasks: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
-
-
+   
 @app.route("/api/get-users", methods=["GET"])
 @jwt_required
 def get_org_users():
