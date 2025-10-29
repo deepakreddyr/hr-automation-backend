@@ -475,6 +475,69 @@ def shortlist():
                     "message": "Search not found or access denied."
                 }), 404
             
+            # Get existing data
+            existing_data = existing_search.data[0]
+            existing_shortlist = existing_data.get("shortlisted_index", "[]")
+            existing_process_state = existing_data.get("process_state", "{}")
+            
+            # Parse existing data
+            if isinstance(existing_shortlist, str):
+                existing_shortlist = json.loads(existing_shortlist)
+            if isinstance(existing_process_state, str):
+                existing_process_state = json.loads(existing_process_state)
+            
+            # Get existing resume_dict (already submitted resumes)
+            existing_resume_dict = existing_process_state.get("resume_dict", {})
+            
+            # Merge old and new candidates
+            # Keep old candidates that have resumes submitted
+            old_candidates_with_resumes = []
+            for candidate in existing_shortlist:
+                candidate_key = f"candidate_{candidate['index']}"
+                if candidate_key in existing_resume_dict:
+                    old_candidates_with_resumes.append(candidate)
+            
+            # Find the maximum index from old candidates to avoid conflicts
+            max_old_index = -1
+            if old_candidates_with_resumes:
+                max_old_index = max(c['index'] for c in old_candidates_with_resumes)
+            
+            # Remap new candidate indices to avoid conflicts with old ones
+            remapped_new_candidates = []
+            new_resume_mapping = {}  # Map old index to new index for updating resume_dict
+            
+            for idx, new_candidate in enumerate(corrected_shortlist):
+                old_index = new_candidate['index']
+                new_index = max_old_index + 1 + idx
+                
+                # Create remapped candidate
+                remapped_candidate = new_candidate.copy()
+                remapped_candidate['index'] = new_index
+                remapped_candidate['original_index'] = old_index  # Keep track of original
+                remapped_new_candidates.append(remapped_candidate)
+                
+                new_resume_mapping[old_index] = new_index
+            
+            # Combine: old candidates first, then new ones with remapped indices
+            merged_shortlist = old_candidates_with_resumes + remapped_new_candidates
+            
+            # Update process_state to preserve old resumes
+            updated_process_state = {
+                "resume_dict": existing_resume_dict,
+                "old_candidate_count": len(old_candidates_with_resumes)
+            }
+            
+            # Debug logging
+            print(f"Update shortlist - Old candidates: {len(old_candidates_with_resumes)}, New candidates: {len(remapped_new_candidates)}")
+            print(f"Old candidate indices: {[c['index'] for c in old_candidates_with_resumes]}")
+            print(f"New candidate indices: {[c['index'] for c in remapped_new_candidates]}")
+            print(f"Merged shortlist total: {len(merged_shortlist)}")
+            
+            # Update search_data with merged list
+            search_data["shortlisted_index"] = json.dumps(merged_shortlist)
+            search_data["process_state"] = json.dumps(updated_process_state)
+            search_data["status"] = "process"  # Reset to process status
+            
             # Update the existing search
             search_resp = supabase.table("search").update(search_data).eq("id", search_id).execute()
             
@@ -482,7 +545,7 @@ def shortlist():
                 return jsonify({"success": False, "error": "Error updating search"}), 500
                 
             final_search_id = search_id
-            operation_message = "Shortlist updated successfully"
+            operation_message = f"Shortlist updated successfully. {len(old_candidates_with_resumes)} old candidates preserved, {len(remapped_new_candidates)} new candidates added."
             
         else:
             # Create new search
@@ -501,7 +564,10 @@ def shortlist():
             "success": True,
             "message": operation_message,
             "search_id": final_search_id,
-            "shortlist": corrected_shortlist
+            "shortlist": corrected_shortlist if not search_id else merged_shortlist,
+            "is_update": bool(search_id),
+            "old_count": len(old_candidates_with_resumes) if search_id else 0,
+            "new_count": len(corrected_shortlist)
         })
         
     except Exception as e:
@@ -510,7 +576,7 @@ def shortlist():
             "success": False,
             "error": "An error occurred while processing your request."
         }), 500
-
+    
 @app.route("/api/shortlist/simple", methods=["POST"])
 @jwt_required
 def create_shortlist():
@@ -658,7 +724,7 @@ def process(search_id):
 
     # === Load search ===     
     result = supabase.table("search").select(
-        "shortlisted_index, process_state, job_description, key_skills"
+        "shortlisted_index, process_state, job_description, key_skills, rc_name, company_location, hc_name, notice_period, remote_work, contract_hiring"
     ).eq("id", search_id).single().execute()     
 
     if not result.data:         
@@ -679,15 +745,36 @@ def process(search_id):
         except json.JSONDecodeError:             
             process_state = {}      
 
-    submitted = len(process_state.get("resume_dict", {}))     
-    target = len(shortlisted)     
-
-    # ✅ Instead of index only, get candidate object
-    candidate = shortlisted[submitted] if submitted < target else None     
-    is_last = (submitted == target - 1)      
+    # Get existing resumes and old candidate count
+    resume_dict = process_state.get("resume_dict", {})
+    old_candidate_count = process_state.get("old_candidate_count", 0)
+    
+    # Calculate how many candidates have resumes (both old and newly added)
+    candidates_with_resumes = len(resume_dict)
+    target = len(shortlisted)
+    
+    # Find current candidate (first one without resume)
+    current_candidate = None
+    current_index_in_list = None
+    
+    for idx, candidate in enumerate(shortlisted):
+        candidate_key = f"candidate_{candidate['index']}"
+        if candidate_key not in resume_dict:
+            current_candidate = candidate
+            current_index_in_list = idx
+            break
+    
+    is_last = (candidates_with_resumes == target - 1)
+    
+    # Separate old and new candidates for display
+    old_candidates = shortlisted[:old_candidate_count] if old_candidate_count > 0 else []
+    new_candidates = shortlisted[old_candidate_count:] if old_candidate_count > 0 else shortlisted
 
     # === POST submission ===
     if request.method == "POST":         
+        if not current_candidate:
+            return jsonify(success=False, errors=["No more candidates to process."]), 400
+            
         resume_text = request.form.get("resumeText", "").strip()
         resume_file = request.files.get("resumeFile")
         
@@ -697,18 +784,15 @@ def process(search_id):
                 filename = resume_file.filename.lower()
                 
                 if filename.endswith('.pdf'):
-                    # Extract text from PDF using PyMuPDF (fitz)
                     import fitz
                     pdf_doc = fitz.open(stream=resume_file.read(), filetype="pdf")
                     resume_text = "\n".join([page.get_text() for page in pdf_doc])
                     pdf_doc.close()
                     
                 elif filename.endswith('.txt'):
-                    # Read text file
                     resume_text = resume_file.read().decode('utf-8')
                     
                 elif filename.endswith('.csv'):
-                    # Read CSV file
                     resume_text = resume_file.read().decode('utf-8')
                     
                 else:
@@ -726,19 +810,22 @@ def process(search_id):
             return jsonify(success=False, errors=errors), 400          
 
         # === Save resume ===         
-        resume_dict = process_state.get("resume_dict", {})
-        resume_dict[f"candidate_{candidate['index']}"] = resume_text
+        resume_dict[f"candidate_{current_candidate['index']}"] = resume_text
         process_state["resume_dict"] = resume_dict
+        
+        # Keep old_candidate_count
+        if old_candidate_count > 0:
+            process_state["old_candidate_count"] = old_candidate_count
 
         # === Update process state ===
         supabase.table("search").update({             
             "process_state": json.dumps(process_state)         
         }).eq("id", search_id).execute()          
 
-        submitted = len(resume_dict)         
-
+        candidates_with_resumes = len(resume_dict)
+        
         # === Final submission ===
-        if submitted == target:
+        if candidates_with_resumes == target:
             supabase.table("search").update({
                 "status": "processing",
                 "processed": False
@@ -746,32 +833,37 @@ def process(search_id):
             
             return jsonify({
                 "success": True,
-                "submitted": submitted,
+                "submitted": candidates_with_resumes,
                 "target": target,
-                "candidate": candidate,  # ✅ full candidate object
+                "candidate": current_candidate,
                 "isLast": True,
                 "next": False,
                 "processing": True,
                 "search_id": search_id
             })
 
-        # Next candidate
-        next_candidate = shortlisted[submitted] if submitted < target else None         
+        # Find next candidate without resume
+        next_candidate = None
+        for candidate in shortlisted:
+            candidate_key = f"candidate_{candidate['index']}"
+            if candidate_key not in resume_dict:
+                next_candidate = candidate
+                break
+        
         return jsonify({             
             "success": True,             
-            "submitted": submitted,             
+            "submitted": candidates_with_resumes,             
             "target": target,             
-            "candidate": next_candidate,  # ✅ send full object
-            "isLast": (submitted == target - 1),             
+            "candidate": next_candidate,
+            "isLast": (candidates_with_resumes == target - 1),             
             "next": True         
         })      
     
     # === GET (initial load) ===
-    # Load right_fields from search table (already saved in shortlist)
     right_fields = {
-        "hiringCompany": result.data.get("hiring_company", ""),
+        "hiringCompany": result.data.get("rc_name", ""),
         "companyLocation": result.data.get("company_location", ""),
-        "hrCompany": result.data.get("hr_company", ""),
+        "hrCompany": result.data.get("hc_name", ""),
         "noticePeriod": result.data.get("notice_period", ""),
         "remoteWork": result.data.get("remote_work", False),
         "contractHiring": result.data.get("contract_hiring", False),
@@ -779,17 +871,21 @@ def process(search_id):
     
     return jsonify({         
         "success": True,         
-        "submitted": submitted,         
+        "submitted": candidates_with_resumes,         
         "target": target,         
-        "candidate": candidate,  # ✅ send full object
+        "candidate": current_candidate,
         "isLast": is_last,         
-        "shortlisted": shortlisted,  # ✅ full list
-        "shortlisted_indices": [c.get('index') for c in shortlisted if isinstance(c, dict)],  # ✅ for progress display
+        "shortlisted": shortlisted,
+        "shortlisted_indices": [c.get('index') for c in shortlisted if isinstance(c, dict)],
+        "old_candidate_count": old_candidate_count,
+        "old_candidates": old_candidates,
+        "new_candidates": new_candidates,
         "right_fields": right_fields,         
         "next": True     
     })
 
-# New route to handle the actual processing (runs in background)
+
+# Process candidates route - handles both old and new candidates
 @app.route("/api/process-candidates/<int:search_id>", methods=["POST"])
 @jwt_required
 def process_candidates(search_id):
@@ -799,7 +895,10 @@ def process_candidates(search_id):
 
     try:
         # Get search data
-        result = supabase.table("search").select("process_state, job_description, key_skills").eq("id", search_id).single().execute()
+        result = supabase.table("search").select(
+            "process_state, job_description, key_skills, shortlisted_index"
+        ).eq("id", search_id).single().execute()
+        
         if not result.data:
             return jsonify(success=False, error="Search not found"), 404
         
@@ -807,27 +906,50 @@ def process_candidates(search_id):
         if isinstance(process_state, str):
             process_state = json.loads(process_state or "{}")
         
+        shortlisted = result.data.get("shortlisted_index") or []
+        if isinstance(shortlisted, str):
+            shortlisted = json.loads(shortlisted or "[]")
+        
         jd = result.data.get("job_description")
         skills = result.data.get("key_skills")
         resume_dict = process_state.get("resume_dict", {})
+        old_candidate_count = process_state.get("old_candidate_count", 0)
         
         print(f"Processing {len(resume_dict)} resumes for search {search_id}")
+        print(f"Old candidates: {old_candidate_count}, Total candidates: {len(shortlisted)}")
         
-        # Get combined resumes
-        combined_resumes = "\n".join(resume_dict.values())
+        # Separate old and new candidate resumes
+        old_resumes = []
+        new_resumes = []
+        
+        for idx, candidate in enumerate(shortlisted):
+            candidate_key = f"candidate_{candidate['index']}"
+            if candidate_key in resume_dict:
+                resume_text = resume_dict[candidate_key]
+                if idx < old_candidate_count:
+                    # This is an old candidate (already processed before)
+                    old_resumes.append(resume_text)
+                else:
+                    # This is a new candidate (added in this update)
+                    new_resumes.append(resume_text)
+        
+        print(f"Old resumes: {len(old_resumes)}, New resumes: {len(new_resumes)}")
+        
+        # Combine all resumes for processing
+        all_resumes = "\n\n--- RESUME SEPARATOR ---\n\n".join(old_resumes + new_resumes)
         
         # Validate required data
-        if not combined_resumes.strip():
+        if not all_resumes.strip():
             supabase.table("search").update({"status": "error", "processed": True}).eq("id", search_id).execute()
             return jsonify(success=False, error="No resume data found"), 400
         if not jd or not jd.strip():
             supabase.table("search").update({"status": "error", "processed": True}).eq("id", search_id).execute()
             return jsonify(success=False, error="No job description found"), 400
         
-        print(f"Processing {len(resume_dict)} resumes, combined length: {len(combined_resumes)}")
+        print(f"Processing {len(resume_dict)} total resumes, combined length: {len(all_resumes)}")
         
-        # Get candidate details from AI
-        candidate_data = get_candidate_details(combined_resumes, jd, skills)
+        # Get candidate details from AI (process all candidates together)
+        candidate_data = get_candidate_details(all_resumes, jd, skills)
         print(f"AI returned {len(candidate_data) if isinstance(candidate_data, list) else 0} candidates")
         
         if not candidate_data or not isinstance(candidate_data, list):
@@ -854,7 +976,14 @@ def process_candidates(search_id):
         
         print(f"Processing {len(unique_candidates)} unique candidates")
         
-        # Insert candidates into database
+        # Delete existing candidates for this search (to avoid duplicates during re-processing)
+        try:
+            supabase.table("candidates").delete().eq("search_id", search_id).execute()
+            print(f"Deleted existing candidates for search {search_id}")
+        except Exception as delete_error:
+            print(f"Error deleting existing candidates: {delete_error}")
+        
+        # Insert all candidates (both old and new) into database
         inserted_count = 0
         for candidate in unique_candidates:
             try:
@@ -871,11 +1000,6 @@ def process_candidates(search_id):
                     continue
                 
                 phone = int(phone_digits) if len(phone_digits) == 10 else None
-                
-                # Check if candidate already exists
-                existing = supabase.table("candidates").select("id").eq("email", email).eq("search_id", search_id).execute()
-                if existing.data:
-                    continue
                 
                 # Prepare skills data
                 experience_in_skills = candidate.get("experience_in_skills", {})
@@ -896,7 +1020,7 @@ def process_candidates(search_id):
                     "match_score": match_score,
                     "org_id": org_id
                 }
-                print(insert_data)
+                
                 # Add history_id if it exists
                 try:
                     history_check = supabase.table("history").select("id").eq("id", search_id).execute()
@@ -923,13 +1047,23 @@ def process_candidates(search_id):
             "processed": True
         }).eq("id", search_id).execute()
         
-        # Deduct credits
-        deduct_credits(user_id,org_id, "process_candidate", reference_id=None)
+        # Deduct credits only once (not per update)
+        # Check if credits were already deducted by looking at a flag
+        credits_deducted = process_state.get("credits_deducted", False)
+        if not credits_deducted:
+            deduct_credits(user_id, org_id, "process_candidate", reference_id=None)
+            # Mark that credits have been deducted
+            process_state["credits_deducted"] = True
+            supabase.table("search").update({
+                "process_state": json.dumps(process_state)
+            }).eq("id", search_id).execute()
         
         return jsonify({
             "success": True,
             "candidates_processed": inserted_count,
-            "search_id": search_id
+            "search_id": search_id,
+            "old_candidates": len(old_resumes),
+            "new_candidates": len(new_resumes)
         })
         
     except Exception as processing_error:
