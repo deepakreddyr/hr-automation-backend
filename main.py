@@ -1154,6 +1154,34 @@ def generate_questions():
         print(f"Generate questions error: {str(e)}")
         return jsonify({"error": "Failed to generate questions"}), 500
 
+@app.route("/api/custom-question", methods=["POST"])
+@jwt_required
+def save_custom_question():
+    """Saves a custom question to the search table."""
+    user = request.current_user
+    user_id = user['user_id']
+    data = request.get_json()
+    
+    search_id = data.get('search_id')
+    question = data.get('question')
+
+    if not search_id or not question:
+        return jsonify({"error": "search_id and question are required"}), 400
+
+    try:
+        # Update the 'search' table with the custom_question
+        result = supabase.table("search").update({"custom_question": question}).eq("id", search_id).eq("user_id", user_id).execute()
+        
+        # Check if any rows were updated (ensures search exists and belongs to user)
+        if not result.data:
+            return jsonify({"error": "Search not found or access denied"}), 404
+
+        return jsonify({"success": True, "message": "Custom question saved successfully"}), 200
+
+    except Exception as e:
+        print(f"Save custom question error: {str(e)}")
+        return jsonify({"error": "Failed to save custom question"}), 500
+
 @app.route('/api/results', methods=["GET"])
 @jwt_required
 def results():
@@ -2191,7 +2219,6 @@ def deduct_credits(user_id,org_id, action_type, reference_id=None):
         "deductions": cost,
         # "reference_id": reference_id
     }).execute()
-
 
 @app.errorhandler(404)
 def not_found(error):
