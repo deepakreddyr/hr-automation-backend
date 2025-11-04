@@ -15,7 +15,6 @@ from dashboard_data import (
     get_user_name
 )
 from generate_embeddings import MemoryOptimizedResumeExtractor
-# from filter_candidates import FlaskJDBasedResumeFilter, JobDescription, CandidateMatch
 import fitz  
 from flask_cors import CORS
 import requests
@@ -119,10 +118,7 @@ extractor = MemoryOptimizedResumeExtractor(
     max_memory_mb=512
 )
 
-# resume_filter = FlaskJDBasedResumeFilter(
-#     supabase_url=os.getenv("SUPABASE_URL"),
-#     supabase_key=os.getenv("SUPABASE_ANON_KEY")
-# )
+
 # ─── JWT Helper Functions ─────────────────────────────────────────────────────
 
 def generate_access_token(user_id, email, org_id):
@@ -1358,7 +1354,7 @@ def remove_final_select():
     return jsonify({"status": "success"})
 
 # ─── Call Initiation Logic ───────────────────────────────────────────────────
-def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_location, notice_period,custom_question,contracth,remotew):
+def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_location, notice_period,custom_question,contracth,remotew,context):
     print("Call candidate works ")
     print(f"Candidate ID {candidate_id}")
     headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
@@ -1376,7 +1372,8 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
                 "candidate_id":str(candidate_id),
                 "custom_question":custom_question,
                 "contract_hiring":contracth,
-                "remote_work":remotew
+                "remote_work":remotew,
+                "context":context,
             }
         },
         "customer": {
@@ -1392,6 +1389,34 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
     except Exception as err:
         return {"name": name, "error": str(err)}
 
+
+def get_previous_call_context(candidate_id):
+    """
+    Returns extra context if the previous call for this candidate 
+    was rescheduled and has a call summary.
+    """
+    try:
+        prev_call = supabase.from_('calls') \
+            .select('id, call_summary, status') \
+            .eq('candidate_id', candidate_id) \
+            .order('created_at', desc=True) \
+            .limit(1) \
+            .execute()
+
+        if prev_call.data and prev_call.data[0]['status'] == 'rescheduled':
+            last_summary = prev_call.data[0].get('call_summary') or ""
+            return (
+                """This is a reschedule call and the below text is the call summary from the previous call. 
+                Keep the context of the previous call and finish all remaining tasks which were not 
+                completed earlier. Make sure to acknowledge that this is a rescheduled call, as requested by the user. 
+                f\n\nPrevious Call Summary:\n{last_summary}"""
+            )
+    except Exception as e:
+        print("Error fetching previous call:", e)
+
+    return "" 
+
+
 @app.route('/api/call-single', methods=['POST'])
 @jwt_required
 def call_single():
@@ -1406,33 +1431,43 @@ def call_single():
     phone = data['phone']
     skills = data.get('skills', [])
     company = data.get('company', '')
-    candidate_id= data.get('candidate_id')
+    candidate_id = data.get('candidate_id')
 
-    da=supabase.from_('search')\
-    .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id')\
-    .eq('id',search_id)\
-    .execute()
+    # ✅ Fetch search details
+    data = supabase.from_('search') \
+        .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id') \
+        .eq('id', search_id) \
+        .execute()
 
-    call_data=da.data[0]
+    call_data = data.data[0]
 
-    contracth=None
-    remotew=None
-    if call_data["contract_hiring"]== True:
-        contracth="Inform the candidate that this is a contract hiring."
-    else:
-        contracth=""
-    if call_data["remote_work"] == True:
-        remotew="This is a remote work."
-    else:
-        remotew="7.⁠ ⁠Ask for the candidate's current location and preferred location 8.⁠ ⁠If the candidate's current location is not the same as {{work_location}}, then ask if the candidate is ready to relocate, else skip this question. skip if its a remote work"
+    # ✅ Keep your existing logic
+    contracth = "Inform the candidate that this is a contract hiring." if call_data["contract_hiring"] else ""
+    remotew = (
+        "This is a remote work."
+        if call_data["remote_work"]
+        else "7.⁠ ⁠Ask for the candidate's current location and preferred location. "
+             "8.⁠ ⁠If the candidate's current location is not the same as {{work_location}}, then ask if the candidate is ready to relocate, else skip this question."
+    )
 
-    custom_question=None
-    if call_data["custom_question"]:
-        custom_question=call_data["custom_question"]
-    else:
-        custom_question=""
+    custom_question = call_data["custom_question"] if call_data["custom_question"] else ""
+    context = get_previous_call_context(candidate_id)
+    # ✅ Call the agent as usual (but now with `context`)
+    result = call_candidate(
+        name=name,
+        phone_number=phone,
+        skills=call_data["key_skills"],
+        employer=call_data["rc_name"],
+        hr=call_data["hc_name"],
+        candidate_id=candidate_id,
+        work_location=call_data["company_location"],
+        notice_period=call_data["notice_period"],
+        custom_question=custom_question,
+        contracth=contracth,
+        remotew=remotew,
+        context=context
+    )
 
-    result = call_candidate(name, phone, skills=call_data["key_skills"], employer=call_data["rc_name"], hr=call_data["hc_name"],candidate_id=candidate_id,work_location=call_data["company_location"],notice_period=call_data["notice_period"],custom_question=custom_question,contracth=contracth,remotew=remotew)
     return jsonify({'status': 'success', 'result': result}), 200
 
 @app.route("/api/call", methods=["POST"])
@@ -1440,43 +1475,46 @@ def call_single():
 def initiate_call():
     data = request.get_json()
     candidates = data.get("candidates", [])
-    search_id=data.get("search_id",[])
+    search_id = data.get("search_id")
+
     results = []
-    da=supabase.from_('search')\
-    .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id')\
-    .eq('id',search_id)\
-    .execute()
 
-    call_data=da.data[0]
+    da = supabase.from_('search') \
+        .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id') \
+        .eq('id', search_id) \
+        .execute()
 
-    contracth=None
-    remotew=None
-    if call_data["contract_hiring"]== True:
-        contracth="Inform the candidate that this is a contract hiring."
-    else:
-        contracth="Inform the candidate that this is not a contract hiring."
-    if call_data["remote_work"] == True:
-        remotew="This is a remote work."
-    else:
-        remotew="This is not a remote work."
-
-    custom_question=None
-    if call_data["custom_question"]:
-        custom_question=call_data["custom_question"]
-    else:
-        custom_question=""
-
+    call_data = da.data[0]
+    
+    contracth = "Inform the candidate that this is a contract hiring." if call_data["contract_hiring"] else ""
+    remotew = "This is a remote work." if call_data["remote_work"] else ""
+    custom_question = call_data["custom_question"] or ""
     
     for c in candidates:
         name = c.get("name")
         phone = c.get("phone")
-        skills = c.get("skills", [])
-        company = c.get("company", "")
         candidate_id = c.get("candidate_id")
 
-        # You can now use candidate_id or store logs, etc.
-        res = call_candidate(name, phone, skills=call_data["key_skills"], employer=call_data["rc_name"], hr=call_data["hc_name"],candidate_id=candidate_id,work_location=call_data["company_location"],notice_period=call_data["notice_period"],custom_question=custom_question,contracth=contracth,remotew=remotew)
-    return jsonify({"message": "Calls initiated", "results": results})
+        # ✅ Reuse previous call context logic for each candidate
+        context = get_previous_call_context(candidate_id)
+
+        res = call_candidate(
+            name=name,
+            phone_number=phone,
+            skills=call_data["key_skills"],
+            employer=call_data["rc_name"],
+            hr=call_data["hc_name"],
+            candidate_id=candidate_id,
+            work_location=call_data["company_location"],
+            notice_period=call_data["notice_period"],
+            custom_question=custom_question,
+            contracth=contracth,
+            remotew=remotew,
+            context=context
+        )
+        results.append(res)
+
+    return jsonify({"message": "Calls initiated", "results": results}), 200
 
 
 def add_call_data(transcript,summary,structuredData,call_status,success_eval,phone,durationMinutes,name,candidate_id,):
@@ -1508,12 +1546,11 @@ def webhook():
     print(data)
 
     message = data.get("message", data)
-    end_call_status = message.get("status", "")
+    end_call_status = message.get("endedReason", "")
     call = message.get("call", {})
     assistantOverrides = call.get("assistantOverrides", {})
     variableValues = assistantOverrides.get("variableValues", {})
     candidate_id = variableValues.get("candidate_id")
-
     # Lookup candidate to get user_id
     candidate_res = supabase.table("candidates").select("id, search_id, org_id").eq("id", candidate_id).execute()
     if not candidate_res.data:
@@ -1541,7 +1578,7 @@ def webhook():
 
     call_status = None
 
-    if end_call_status == "ended":
+    if end_call_status == "customer-did-not-answer":
         call_status = "Not Answered"
         supabase.table("candidates").update({
             "call_status": call_status
