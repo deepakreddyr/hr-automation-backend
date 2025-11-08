@@ -1275,8 +1275,6 @@ def like_candidate():
     supabase.table("candidates").update({"liked": liked}).eq("id", candidate_id).execute()
     return jsonify({"success": True}), 200
 
-
-
 @app.route("/api/unlike-candidate", methods=["POST"])
 @jwt_required
 def unlike_candidate():
@@ -1290,7 +1288,6 @@ def unlike_candidate():
     # Update 'liked' column in Supabase
     supabase.table("candidates").update({"liked": liked}).eq("id", candidate_id).execute()
     return jsonify({"success": True}), 200
-
 
 @app.route('/api/add-final-select', methods=['POST'])
 @jwt_required
@@ -1661,7 +1658,7 @@ def initiate_call():
     return jsonify({"message": "Calls initiated", "results": results}), 200
 
 def add_call_data(transcript, summary, structuredData, call_status, success_eval, 
-                  phone, durationMinutes, name, candidate_id, reschedule_time=None, 
+                  phone, durationMinutes, name, candidate_id,org_id, reschedule_time=None, 
                   reschedule_status=None):
     """Add call data to the calls table and return the record ID"""
     
@@ -1677,7 +1674,8 @@ def add_call_data(transcript, summary, structuredData, call_status, success_eval
             "phone": phone,
             "call_duration": float(durationMinutes) * 60,  # Convert to seconds
             "reschedule_time": reschedule_time,
-            "reschedule_status": reschedule_status
+            "reschedule_status": reschedule_status,
+            "org_id":org_id
         }).execute()
         
         # ✅ FIX: Properly extract and return the ID
@@ -1781,6 +1779,7 @@ def webhook():
             transcript, summary, structuredData, call_status, 
             success_eval, phone_int, durationMinutes, name, 
             candidate_id=int(candidate_id),
+            org_id=org_id,
             reschedule_time=reschedule_time,
             reschedule_status="pending"
         )
@@ -1836,6 +1835,7 @@ def webhook():
             transcript, summary, structuredData, call_status, 
             success_eval, phone_int, durationMinutes, name, 
             candidate_id=int(candidate_id),
+            org_id=org_id,
             reschedule_time=None,
             reschedule_status=None
         )

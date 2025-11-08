@@ -31,7 +31,6 @@ def get_total_credits_used(user_id):
     return total_credits
 
 
-
 def get_user_name(user_id):
     response = (
         supabase.from_("users")
