@@ -3,7 +3,9 @@ import json
 from dotenv import load_dotenv
 from openai import OpenAI
 import openai
-
+from dateutil import parser
+from datetime import datetime, timedelta
+import re
 # Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -367,3 +369,258 @@ def scrape(data):
             temp.append(i)
 
     return final
+
+def parse_reschedule_time(time_string):
+    """
+    Convert natural language time strings to timestamp
+    Try regex first (fast), fallback to OpenAI for complex cases
+    """
+    if not time_string or time_string.strip() == "":
+        return None
+    
+    try:
+        time_string_lower = time_string.lower().strip()
+        now = datetime.now()
+        
+        # List of patterns we can handle with regex
+        simple_patterns = [
+            r'in\s+',           # "in X min/hr"
+            r'after\s+',        # "after X hours"
+            r'o\'?clock',       # "2 o'clock"
+            r'tomorrow',        # "tomorrow"
+            r'next day',        # "next day"
+            r'\d+\s*:\s*\d+',   # "5:30"
+            r'\d+\s*(am|pm)',   # "3pm", "10am"
+            r'monday|tuesday|wednesday|thursday|friday|saturday|sunday',  # day names
+        ]
+        
+        # Check if it's a simple pattern we can handle
+        is_simple = any(re.search(pattern, time_string_lower) for pattern in simple_patterns)
+        
+        if is_simple:
+            # Use regex logic
+            result = parse_with_regex(time_string_lower, now)
+            if result:
+                return result
+            else:
+                # Regex failed, try OpenAI
+                print(f"Regex parsing failed for '{time_string}', trying OpenAI")
+                return parse_with_openai(time_string)
+        else:
+            # Complex/ambiguous case - use OpenAI
+            print(f"Complex time expression detected: '{time_string}', using OpenAI")
+            return parse_with_openai(time_string)
+            
+    except Exception as e:
+        print(f"Error parsing time '{time_string}': {e}")
+        # Default fallback
+        default_time = datetime.now() + timedelta(days=1)
+        default_time = default_time.replace(hour=10, minute=0, second=0, microsecond=0)
+        return default_time.isoformat()
+
+
+def parse_with_regex(time_string, now):
+    """Parse time using regex patterns"""
+    try:
+        # Handle relative time formats (e.g., "in 2 hr", "in 5 min", "in another 30 minutes")
+        # Remove "another" to normalize the string
+        normalized_time = time_string.replace("another", "").strip()
+        
+        if "in " in normalized_time or time_string.startswith("another"):
+            # Match patterns like "in 2 hr", "in 5 minutes", "in 1 hour", "another 5 min"
+            hours_match = re.search(r'(\d+)\s*(hr|hour|hours)', normalized_time)
+            minutes_match = re.search(r'(\d+)\s*(min|minute|minutes)', normalized_time)
+            
+            delta = timedelta()
+            
+            if hours_match:
+                hours = int(hours_match.group(1))
+                delta += timedelta(hours=hours)
+            
+            if minutes_match:
+                minutes = int(minutes_match.group(1))
+                delta += timedelta(minutes=minutes)
+            
+            # If we found either hours or minutes
+            if hours_match or minutes_match:
+                scheduled_time = now + delta
+                return scheduled_time.isoformat()
+        
+        # Handle "after X hours/minutes" format (including "after another X")
+        after_match = re.search(r'after\s+(?:another\s+)?(\d+)\s*(hr|hour|hours|min|minute|minutes)', time_string)
+        if after_match:
+            value = int(after_match.group(1))
+            unit = after_match.group(2)
+            
+            if 'hr' in unit or 'hour' in unit:
+                scheduled_time = now + timedelta(hours=value)
+            else:  # minutes
+                scheduled_time = now + timedelta(minutes=value)
+            
+            return scheduled_time.isoformat()
+        
+        # Handle "o'clock" format (e.g., "2 o'clock")
+        if "o'clock" in time_string:
+            hour_match = re.search(r'(\d+)\s*o\'?clock', time_string)
+            if hour_match:
+                hour = int(hour_match.group(1))
+                # Assume PM if hour is between 1-7, AM if 8-12
+                if 1 <= hour <= 7:
+                    hour += 12
+                elif hour == 12:
+                    hour = 12
+                
+                scheduled_time = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+                
+                # If the time has passed today, schedule for tomorrow
+                if scheduled_time <= now:
+                    scheduled_time += timedelta(days=1)
+                
+                return scheduled_time.isoformat()
+        
+        # Handle "tomorrow" keyword
+        if "tomorrow" in time_string:
+            time_part = time_string.replace("tomorrow", "").replace("at", "").strip()
+            base_date = now + timedelta(days=1)
+            
+            if time_part:
+                # Try to parse the time part
+                try:
+                    parsed_time = parser.parse(time_part, fuzzy=True)
+                    scheduled_time = base_date.replace(
+                        hour=parsed_time.hour,
+                        minute=parsed_time.minute,
+                        second=0,
+                        microsecond=0
+                    )
+                    return scheduled_time.isoformat()
+                except:
+                    # Default to 10 AM tomorrow if parsing fails
+                    scheduled_time = base_date.replace(hour=10, minute=0, second=0, microsecond=0)
+                    return scheduled_time.isoformat()
+        
+        # Handle "next day" or "the next day"
+        if "next day" in time_string or "the next day" in time_string:
+            time_part = re.sub(r'(next day|the next day)', '', time_string).replace("at", "").strip()
+            base_date = now + timedelta(days=1)
+            
+            if time_part:
+                try:
+                    parsed_time = parser.parse(time_part, fuzzy=True)
+                    scheduled_time = base_date.replace(
+                        hour=parsed_time.hour,
+                        minute=parsed_time.minute,
+                        second=0,
+                        microsecond=0
+                    )
+                    return scheduled_time.isoformat()
+                except:
+                    scheduled_time = base_date.replace(hour=10, minute=0, second=0, microsecond=0)
+                    return scheduled_time.isoformat()
+        
+        # Handle day of week (e.g., "Monday at 3pm", "next Friday")
+        weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        for day in weekdays:
+            if day in time_string:
+                target_day = weekdays.index(day)
+                current_day = now.weekday()
+                days_ahead = target_day - current_day
+                
+                if days_ahead <= 0:  # Target day already happened this week
+                    days_ahead += 7
+                
+                base_date = now + timedelta(days=days_ahead)
+                time_part = time_string.replace(day, "").replace("next", "").replace("at", "").strip()
+                
+                if time_part:
+                    try:
+                        parsed_time = parser.parse(time_part, fuzzy=True)
+                        scheduled_time = base_date.replace(
+                            hour=parsed_time.hour,
+                            minute=parsed_time.minute,
+                            second=0,
+                            microsecond=0
+                        )
+                        return scheduled_time.isoformat()
+                    except:
+                        pass
+                
+                # Default to 10 AM if no time specified
+                scheduled_time = base_date.replace(hour=10, minute=0, second=0, microsecond=0)
+                return scheduled_time.isoformat()
+        
+        # Try general parsing with dateutil (handles "3pm", "5:30pm", etc.)
+        parsed = parser.parse(time_string, fuzzy=True)
+        
+        # If only time was provided (no date), use today or tomorrow
+        if parsed.date() == datetime.now().date():
+            scheduled_time = now.replace(
+                hour=parsed.hour,
+                minute=parsed.minute,
+                second=0,
+                microsecond=0
+            )
+            
+            # If time has passed, schedule for tomorrow
+            if scheduled_time <= now:
+                scheduled_time += timedelta(days=1)
+        else:
+            scheduled_time = parsed
+        
+        return scheduled_time.isoformat()
+        
+    except Exception as e:
+        print(f"Regex parsing error: {e}")
+        return None
+
+
+def parse_with_openai(time_string):
+    """Fallback for complex expressions using OpenAI"""
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        current_time = datetime.now()
+        prompt = f"""Convert this time expression to an ISO 8601 timestamp.
+
+Current date and time: {current_time.strftime('%Y-%m-%d %H:%M:%S')} ({current_time.strftime('%A')})
+Time zone: Assume local time (no timezone conversion needed)
+User said: "{time_string}"
+
+Rules:
+- Return ONLY the ISO timestamp in format: YYYY-MM-DDTHH:MM:SS
+- If the time is ambiguous (like "evening"), use reasonable defaults (evening = 6 PM)
+- If no date is mentioned and the time has passed today, assume tomorrow
+- Do not include any explanation, just the timestamp
+
+Example outputs:
+- "2025-11-06T14:30:00"
+- "2025-11-10T18:00:00"
+"""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Cheaper and faster
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=50
+        )
+        
+        timestamp_str = response.choices[0].message.content.strip()
+        
+        # Validate it's a proper timestamp
+        parsed_dt = datetime.fromisoformat(timestamp_str)
+        
+        # Additional validation: make sure it's not in the past (unless very recent)
+        if parsed_dt < datetime.now() - timedelta(minutes=5):
+            print(f"Warning: OpenAI returned past timestamp: {timestamp_str}")
+            # Use tomorrow at same time instead
+            parsed_dt = parsed_dt + timedelta(days=1)
+            return parsed_dt.isoformat()
+        
+        return timestamp_str
+        
+    except Exception as e:
+        print(f"OpenAI parsing failed: {e}")
+        # Return default: tomorrow at 10 AM
+        default_time = datetime.now() + timedelta(days=1)
+        default_time = default_time.replace(hour=10, minute=0, second=0, microsecond=0)
+        return default_time.isoformat()

@@ -18,9 +18,11 @@ from generate_embeddings import MemoryOptimizedResumeExtractor
 import fitz  
 from flask_cors import CORS
 import requests
-from aiparser import shortlist_candidates,scrape,get_candidate_details,get_questions,get_embedding
+from aiparser import shortlist_candidates,scrape,get_candidate_details,get_questions,get_embedding,parse_reschedule_time
 from supabase import create_client, Client
-
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.date import DateTrigger
+import atexit
 # ─── App & Config ─────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -34,8 +36,8 @@ IS_PRODUCTION = os.getenv("FLASK_ENV") == "production" or os.getenv("ENVIRONMENT
 # JWT Secret Key - Use a strong secret key
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
 JWT_ALGORITHM = "HS256"
-JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)  # Access token expires in 24 hours
-JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)  # Refresh token expires in 30 days
+JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=690)  # Access token expires in 24 hours
+JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=800)  # Refresh token expires in 30 days
 
 # ─── Unified CORS Configuration (Works for Both Localhost & Vercel) ─────────────
 
@@ -71,6 +73,14 @@ print(f"Environment: {'PRODUCTION' if IS_PRODUCTION else 'DEVELOPMENT'}")
 print(f"Allowed origins: {ALLOWED_ORIGINS}")
 print("==================================")
 
+
+
+# Initialize APScheduler
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+# Shutdown scheduler gracefully when app closes
+atexit.register(lambda: scheduler.shutdown())
 # Unified CORS Configuration
 CORS(
     app,
@@ -1354,13 +1364,18 @@ def remove_final_select():
     return jsonify({"status": "success"})
 
 # ─── Call Initiation Logic ───────────────────────────────────────────────────
-def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_location, notice_period,custom_question,contracth,remotew,context):
-    print("Call candidate works ")
+def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_location, notice_period, custom_question, contracth, remotew, context):
+    """
+    Initiate a call via VAPI API
+    Returns the call response with call_id for tracking
+    """
+    print("Call candidate works")
     print(f"Candidate ID {candidate_id}")
+    
     headers = {"Authorization": f"Bearer {VAPI_API_KEY}"}
     payload = {
         "assistantId": AGENT_ID,
-        "phoneNumberId": VAPI_PHONE_NUMBER_ID,  # Now dynamic
+        "phoneNumberId": VAPI_PHONE_NUMBER_ID,
         "assistantOverrides": {
             "variableValues": {
                 "name": name,
@@ -1368,12 +1383,12 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
                 "employer": employer,
                 "hr": hr,
                 "work_location": work_location,
-                "days":notice_period,
-                "candidate_id":str(candidate_id),
-                "custom_question":custom_question,
-                "contract_hiring":contracth,
-                "remote_work":remotew,
-                "context":context,
+                "days": notice_period,
+                "candidate_id": str(candidate_id),
+                "custom_question": custom_question,
+                "contract_hiring": contracth,
+                "remote_work": remotew,
+                "context": context,
             }
         },
         "customer": {
@@ -1381,14 +1396,23 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
             "name": name
         }
     }
+    
     try:
-        print("works here")
+        print("Making VAPI call...")
         resp = requests.post(VAPI_URL, headers=headers, json=payload)
-        print(resp.json())
-        return {"name": name, "status": resp.status_code}
+        response_data = resp.json()
+        print(response_data)
+        
+        # Return both status and call_id for tracking
+        return {
+            "name": name,
+            "status": resp.status_code,
+            "call_id": response_data.get("id"),  # VAPI returns call ID
+            "phone": phone_number
+        }
     except Exception as err:
-        return {"name": name, "error": str(err)}
-
+        print(f"Error calling candidate: {err}")
+        return {"name": name, "phone": phone_number, "error": str(err)}
 
 def get_previous_call_context(candidate_id):
     """
@@ -1402,21 +1426,141 @@ def get_previous_call_context(candidate_id):
             .order('created_at', desc=True) \
             .limit(1) \
             .execute()
-
-        if prev_call.data and prev_call.data[0]['status'] == 'rescheduled':
+        
+        if prev_call.data and prev_call.data[0]['status'] == 'Re-schedule':
             last_summary = prev_call.data[0].get('call_summary') or ""
             return (
-                """This is a reschedule call and the below text is the call summary from the previous call. 
+                f"""This is a reschedule call and the below text is the call summary from the previous call. 
                 Keep the context of the previous call and finish all remaining tasks which were not 
                 completed earlier. Make sure to acknowledge that this is a rescheduled call, as requested by the user. 
-                f\n\nPrevious Call Summary:\n{last_summary}"""
+                \n\nPrevious Call Summary:\n{last_summary}"""
             )
     except Exception as e:
         print("Error fetching previous call:", e)
 
     return "" 
 
-
+def schedule_call(candidate_id, phone_number, candidate_name, reschedule_time_str, call_record_id, search_id):
+    """
+    Schedule a call at the specified time using APScheduler
+    """
+    try:
+        # ✅ FIX: Validate inputs
+        if not call_record_id:
+            print(f"❌ Invalid call_record_id: {call_record_id}")
+            return None
+        
+        if not reschedule_time_str:
+            print(f"❌ Invalid reschedule_time_str: {reschedule_time_str}")
+            return None
+        
+        # Parse the reschedule time
+        reschedule_time = datetime.fromisoformat(reschedule_time_str)
+        
+        # Check if the time is in the past
+        if reschedule_time <= datetime.now():
+            print(f"⚠️ Reschedule time is in the past! Scheduling for 5 minutes from now instead.")
+            reschedule_time = datetime.now() + timedelta(minutes=5)
+        
+        # Create a unique job ID
+        job_id = f"call_{candidate_id}_{call_record_id}_{int(datetime.now().timestamp())}"
+        
+        print(f"⏰ Scheduling call:")
+        print(f"   Candidate: {candidate_name} (ID: {candidate_id})")
+        print(f"   Time: {reschedule_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   Job ID: {job_id}")
+        print(f"   Call Record ID: {call_record_id}")
+        
+        # Schedule the call
+        scheduler.add_job(
+            func=make_scheduled_vapi_call,
+            trigger=DateTrigger(run_date=reschedule_time),
+            args=[candidate_id, phone_number, candidate_name, search_id],
+            id=job_id,
+            name=f"Scheduled call for {candidate_name}",
+            replace_existing=True
+        )
+        
+        print(f"✅ Job added to scheduler")
+        
+        # Store the job_id in the database for tracking
+        update_result = supabase.table("calls").update({
+            "scheduled_job_id": job_id
+        }).eq("id", call_record_id).execute()
+        
+        print(f"✅ Database updated with job_id")
+        
+        return job_id
+        
+    except ValueError as e:
+        print(f"❌ Invalid datetime format: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Error scheduling call: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+    
+# ─── Make Scheduled VAPI Call ───────────────────────────────────────────────
+def make_scheduled_vapi_call(candidate_id, phone_number, candidate_name, search_id):
+    """
+    Make an automated call using VAPI for scheduled/rescheduled calls
+    This fetches all necessary data from the database
+    """
+    try:
+        # Fetch search data
+        da = supabase.from_('search') \
+            .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id') \
+            .eq('id', search_id) \
+            .execute()
+        
+        if not da.data:
+            print(f"❌ Search ID {search_id} not found")
+            return None
+        
+        call_data = da.data[0]
+        
+        contracth = "Inform the candidate that this is a contract hiring." if call_data["contract_hiring"] else ""
+        remotew = "This is a remote work." if call_data["remote_work"] else ""
+        custom_question = call_data["custom_question"] or ""
+        
+        # Get previous call context
+        context = get_previous_call_context(candidate_id)
+        print(f"call context {context}")
+        
+        # Make the call using the existing call_candidate function
+        result = call_candidate(
+            name=candidate_name,
+            phone_number=phone_number,
+            skills=call_data["key_skills"],
+            employer=call_data["rc_name"],
+            hr=call_data["hc_name"],
+            candidate_id=candidate_id,
+            work_location=call_data["company_location"],
+            notice_period=call_data["notice_period"],
+            custom_question=custom_question,
+            contracth=contracth,
+            remotew=remotew,
+            context=context
+        )
+        
+        if result.get("status") == 201:
+            print(f"✅ Scheduled call initiated successfully for {candidate_name}!")
+            
+            # Update candidate status
+            supabase.table("candidates").update({
+                "call_status": "Rescheduled Call In Progress"
+            }).eq('id', candidate_id).execute()
+            
+            return result
+        else:
+            print(f"❌ Failed to initiate scheduled call: {result}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error making scheduled VAPI call: {e}")
+        return None
+    
 @app.route('/api/call-single', methods=['POST'])
 @jwt_required
 def call_single():
@@ -1516,58 +1660,75 @@ def initiate_call():
 
     return jsonify({"message": "Calls initiated", "results": results}), 200
 
+def add_call_data(transcript, summary, structuredData, call_status, success_eval, 
+                  phone, durationMinutes, name, candidate_id, reschedule_time=None, 
+                  reschedule_status=None):
+    """Add call data to the calls table and return the record ID"""
+    
+    try:
+        result = supabase.table("calls").insert({
+            "candidate_id": candidate_id,
+            "transcript": transcript,
+            "call_summary": summary,
+            "structured_call_data": json.dumps(structuredData),
+            "status": call_status,
+            "evaluation": success_eval,
+            "name": name,
+            "phone": phone,
+            "call_duration": float(durationMinutes) * 60,  # Convert to seconds
+            "reschedule_time": reschedule_time,
+            "reschedule_status": reschedule_status
+        }).execute()
+        
+        # ✅ FIX: Properly extract and return the ID
+        if result.data and len(result.data) > 0:
+            call_record_id = result.data[0]["id"]
+            print(f"✅ Added call data (ID: {call_record_id}, reschedule_time: {reschedule_time})")
+        else:
+            print("❌ No data returned from insert operation")
+            call_record_id = None
+        
+        # Update candidate status
+        supabase.table("candidates").update({
+            "call_status": call_status
+        }).eq('id', candidate_id).execute()
+        
+        return call_record_id  # ✅ Return the ID
+        
+    except Exception as e:
+        print(f"❌ Error in add_call_data: {e}")
+        return None  # Return None on error
 
-def add_call_data(transcript,summary,structuredData,call_status,success_eval,phone,durationMinutes,name,candidate_id,):
-
-    supabase.table("calls").insert({
-        "candidate_id": candidate_id,
-        "transcript": transcript,
-        "call_summary": summary,
-        "structured_call_data": json.dumps(structuredData),
-        "status": call_status,
-        "evaluation": success_eval,
-        "name":name,
-        "phone":phone,
-        "call_duration":durationMinutes
-        # "search_id": session["search_id"],
-        # "user_id": session["user_id"]
-    }).execute()
-
-    supabase.table("candidates").update({
-        "call_status":call_status
-    }).eq('id', candidate_id).execute()
-
-    print("Added data to call")
-
-
+# ─── Updated Webhook Function ───────────────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
     print(data)
-
     message = data.get("message", data)
     end_call_status = message.get("endedReason", "")
     call = message.get("call", {})
     assistantOverrides = call.get("assistantOverrides", {})
     variableValues = assistantOverrides.get("variableValues", {})
     candidate_id = variableValues.get("candidate_id")
-    # Lookup candidate to get user_id
-    candidate_res = supabase.table("candidates").select("id, search_id, org_id").eq("id", candidate_id).execute()
+    
+    # Lookup candidate
+    candidate_res = supabase.table("candidates").select("id, search_id, org_id, call_status").eq("id", candidate_id).execute()
     if not candidate_res.data:
         return jsonify({"error": "Candidate not found"}), 404
-
+    
     search_id = candidate_res.data[0]["search_id"]
     org_id = candidate_res.data[0]["org_id"]
-
+    previous_call_status = candidate_res.data[0].get("call_status")
+    
     search_res = supabase.table("search").select("user_id").eq("id", search_id).execute()
     if not search_res.data:
         return jsonify({"error": "Search not found"}), 404
-
-    user_id = search_res.data[0]["user_id"]   # <-- instead of session["user_id"]
+    user_id = search_res.data[0]["user_id"]
     
     customer = call.get("customer", {})
     name = customer.get("name", "")
-    phone = int(customer.get("number", "")[-10:]) if customer.get("number") else None
+    phone = customer.get("number", "")
+    phone_int = int(phone[-10:]) if phone else None
     transcript = message.get("transcript", "")
     analysis = message.get("analysis", {})
     summary = analysis.get("summary", "")
@@ -1575,34 +1736,112 @@ def webhook():
     status = structuredData.get("re-schedule", "")
     success_eval = analysis.get("successEvaluation", "")
     durationMinutes = message.get("durationMinutes", "")
-
     call_status = None
-
+    
+    # Check for pending reschedules
+    previous_reschedule = supabase.table("calls")\
+        .select("id, reschedule_status, scheduled_job_id")\
+        .eq("candidate_id", candidate_id)\
+        .eq("reschedule_status", "pending")\
+        .order("created_at", desc=True)\
+        .limit(1)\
+        .execute()
+    
     if end_call_status == "customer-did-not-answer":
         call_status = "Not Answered"
         supabase.table("candidates").update({
             "call_status": call_status
         }).eq('id', candidate_id).execute()
-
-    if status == "yes":
+        
+    elif status == "yes":
+        # Candidate wants to reschedule
         call_status = "Re-schedule"
-        add_call_data(transcript, summary, structuredData, call_status, success_eval, phone, durationMinutes, name, candidate_id=int(candidate_id))
-        deduct_credits(user_id,org_id, "rescheduled_call", reference_id=None)
-
+        raw_reschedule_time = structuredData.get("reschedule_time", "")
+        reschedule_time = parse_reschedule_time(raw_reschedule_time)
+        
+        print(f"📅 Reschedule requested: '{raw_reschedule_time}' -> {reschedule_time}")
+        
+        # If there's a previous pending reschedule, cancel it
+        if previous_reschedule.data and len(previous_reschedule.data) > 0:
+            old_job_id = previous_reschedule.data[0].get("scheduled_job_id")
+            if old_job_id:
+                try:
+                    scheduler.remove_job(old_job_id)
+                    print(f"🗑️ Cancelled previous scheduled call: {old_job_id}")
+                except Exception as e:
+                    print(f"⚠️ Could not cancel previous job: {e}")
+            
+            supabase.table("calls").update({
+                "reschedule_status": "completed_but_rescheduled_again"
+            }).eq("id", previous_reschedule.data[0]["id"]).execute()
+            print(f"✅ Updated previous reschedule status")
+        
+        # Add call data first to get the call record ID
+        call_record_id = add_call_data(
+            transcript, summary, structuredData, call_status, 
+            success_eval, phone_int, durationMinutes, name, 
+            candidate_id=int(candidate_id),
+            reschedule_time=reschedule_time,
+            reschedule_status="pending"
+        )
+        
+        # ✅ FIX: Check if call_record_id is valid before scheduling
+        if not call_record_id:
+            print("❌ Failed to get call_record_id, cannot schedule call")
+            deduct_credits(user_id, org_id, "rescheduled_call", reference_id=None)
+            return jsonify({"status": "error", "message": "Failed to save call data"}), 500
+        
+        print(f"✅ Call record created with ID: {call_record_id}")
+        
+        # Schedule the automated call
+        if reschedule_time and phone:
+            job_id = schedule_call(
+                candidate_id=int(candidate_id),
+                phone_number=str(phone_int),  # Use cleaned phone number
+                candidate_name=name,
+                reschedule_time_str=reschedule_time,
+                call_record_id=call_record_id,  # ✅ Now guaranteed to be valid
+                search_id=search_id
+            )
+            
+            if job_id:
+                print(f"✅ Automated call scheduled successfully! Job ID: {job_id}")
+            else:
+                print(f"⚠️ Failed to schedule automated call")
+        else:
+            print(f"⚠️ Missing reschedule_time or phone, cannot schedule call")
+        
+        deduct_credits(user_id, org_id, "rescheduled_call", reference_id=None)
+        
     elif status == "no":
+        # Call completed successfully
         call_status = "Called & Answered"
-        add_call_data(transcript, summary, structuredData, call_status, success_eval, phone, durationMinutes, name, candidate_id=int(candidate_id))
-        deduct_credits(user_id,org_id, "ai_call", reference_id=None)
-
-    print(f"Transcript : {transcript}")
-    print(f"Summary : {summary}")
-    print(f"Structured data : {structuredData}")
-    print(f"Call Status : {call_status}")
-    print(f"Evaluation : {success_eval}")
-    print(f"Phone : {phone}")
-    print(candidate_id)
-    print("✅ Inserted into calls table")
-
+        
+        # Cancel any pending scheduled calls
+        if previous_reschedule.data and len(previous_reschedule.data) > 0:
+            old_job_id = previous_reschedule.data[0].get("scheduled_job_id")
+            if old_job_id:
+                try:
+                    scheduler.remove_job(old_job_id)
+                    print(f"🗑️ Cancelled scheduled call (completed): {old_job_id}")
+                except Exception as e:
+                    print(f"⚠️ Could not cancel job: {e}")
+            
+            supabase.table("calls").update({
+                "reschedule_status": "completed"
+            }).eq("id", previous_reschedule.data[0]["id"]).execute()
+            print(f"✅ Updated previous reschedule status to 'completed'")
+        
+        add_call_data(
+            transcript, summary, structuredData, call_status, 
+            success_eval, phone_int, durationMinutes, name, 
+            candidate_id=int(candidate_id),
+            reschedule_time=None,
+            reschedule_status=None
+        )
+        deduct_credits(user_id, org_id, "ai_call", reference_id=None)
+    
+    print(f"✅ Webhook processed successfully")
     return jsonify({"status": "received"}), 200
 
 @app.route("/api/transcript/<int:candidate_id>")
@@ -1611,45 +1850,64 @@ def api_transcript(candidate_id):
     try:
         import json
 
-        # Fetch candidate
+        # 1. Fetch candidate (remains the same)
         candidate_res = supabase.table("candidates").select("*").eq("id", candidate_id).execute()
         if not candidate_res.data:
             return jsonify({"error": "Candidate not found"}), 404
         candidate = candidate_res.data[0]
 
-        # Fetch candidate's call
-        call_res = supabase.table("calls").select("*").eq("candidate_id", candidate_id).execute()
-        calls = call_res.data or []
-        call = calls[0] if calls else {}
+        # 2. Fetch ALL calls for the candidate (MODIFIED)
+        # Assuming we want to sort by ID or a 'created_at' column to get call order
+        call_res = supabase.table("calls").select("*").eq("candidate_id", candidate_id).order("id", desc=False).execute()
+        all_calls_raw = call_res.data or []
+        
+        processed_calls = []
 
-        # Parse structured_call_data
-        structured_data = call.get("structured_call_data")
-        if isinstance(structured_data, str):
-            try:
-                structured_data = json.loads(structured_data)
-            except json.JSONDecodeError:
-                structured_data = {}
+        for call in all_calls_raw:
+            # Parse structured_call_data
+            structured_data = call.get("structured_call_data")
+            if isinstance(structured_data, str):
+                try:
+                    structured_data = json.loads(structured_data)
+                except json.JSONDecodeError:
+                    structured_data = {}
 
-        # Parse transcript
-        transcript_text = call.get("transcript", "")
-        transcript = []
-        for line in transcript_text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("AI:"):
-                transcript.append({"speaker": "ai", "message": line[3:].strip(), "timestamp": ""})
-            elif line.startswith("User:") or line.startswith("You:"):
-                transcript.append({"speaker": "candidate", "message": line.split(":", 1)[1].strip(), "timestamp": ""})
+            # Parse transcript
+            transcript_text = call.get("transcript", "")
+            transcript = []
+            for line in transcript_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("AI:"):
+                    transcript.append({"speaker": "ai", "message": line[3:].strip(), "timestamp": ""})
+                elif line.startswith("User:") or line.startswith("You:"):
+                    transcript.append({"speaker": "candidate", "message": line.split(":", 1)[1].strip(), "timestamp": ""})
 
-        # Parse evaluation
-        eval_raw = call.get("evaluation")
-        evaluation = {}
-        if eval_raw:
-            try:
-                evaluation = json.loads(eval_raw)
-            except:
-                evaluation = {"summary": eval_raw}
+            # Parse evaluation
+            eval_raw = call.get("evaluation")
+            evaluation = {}
+            if eval_raw:
+                try:
+                    # Attempt to parse as JSON first
+                    evaluation = json.loads(eval_raw)
+                except:
+                    # Fallback to simple summary if it's not valid JSON
+                    evaluation = {"summary": eval_raw}
+
+            # Append the structured call data to the list
+            processed_calls.append({
+                "id": call.get("id"), # Keep the call ID for tracking
+                "transcript": transcript,
+                "evaluation": evaluation,
+                "structured": structured_data,
+                "call": {
+                    "duration": call.get("call_duration"),
+                    "status": call.get("status"),
+                    "summary": call.get("call_summary", ""),
+                    "timestamp": call.get("created_at") # Assuming a timestamp column exists
+                }
+            })
 
         # Final structured JSON response
         return jsonify({
@@ -1667,14 +1925,7 @@ def api_transcript(candidate_id):
                 "hiringStatus": candidate.get("hiring_status"),
                 "joinStatus": candidate.get("join_status")
             },
-            "transcript": transcript,
-            "evaluation": evaluation,
-            "structured": structured_data,
-            "call": {
-                "duration": call.get("call_duration"),
-                "status": call.get("status"),
-                "summary": call.get("call_summary", "")
-            }
+            "calls": processed_calls, # Now returns a list of calls
         })
 
     except Exception as e:
