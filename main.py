@@ -1672,7 +1672,7 @@ def add_call_data(transcript, summary, structuredData, call_status, success_eval
             "evaluation": success_eval,
             "name": name,
             "phone": phone,
-            "call_duration": float(durationMinutes) * 60,  # Convert to seconds
+            "call_duration": float(durationMinutes),
             "reschedule_time": reschedule_time,
             "reschedule_status": reschedule_status,
             "org_id":org_id
