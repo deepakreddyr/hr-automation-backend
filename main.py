@@ -1288,7 +1288,7 @@ def results():
     except Exception as e:
         print(f"Results API error: {str(e)}")
         return jsonify({"error": "Failed to fetch results"}), 500
-    
+
 @app.route("/api/like-candidate", methods=["POST"])
 @jwt_required
 def like_candidate():
@@ -1303,6 +1303,157 @@ def like_candidate():
     # Update 'liked' column in Supabase
     supabase.table("candidates").update({"liked": liked}).eq("id", candidate_id).execute()
     return jsonify({"success": True}), 200
+
+@app.route("/api/candidate", methods=["GET", "POST", "PUT", "DELETE"])
+@jwt_required
+def candidate_handler():
+    """Handles CRUD operations for candidates."""
+    user = request.current_user
+    user_id = user['user_id']
+    
+    if request.method == "GET":
+        # --- GET: Fetch a single candidate by ID ---
+        candidate_id = request.args.get('candidate_id')
+        
+        if not candidate_id:
+            return jsonify({"error": "candidate_id is required"}), 400
+
+        try:
+            result = supabase.table("candidates").select("*").eq("id", candidate_id).eq("user_id", user_id).single().execute()
+            
+            if not result.data:
+                return jsonify({"error": "Candidate not found or access denied"}), 404
+
+            return jsonify({"success": True, "candidate": result.data}), 200
+
+        except Exception as e:
+            print(f"Get candidate error: {str(e)}")
+            return jsonify({"error": "Failed to fetch candidate"}), 500
+
+    elif request.method == "POST":
+        # --- POST: Add a new candidate ---
+        data = request.get_json()
+        
+        # Required fields
+        name = data.get('name')
+        email = data.get('email')
+        phone = data.get('phone')
+        search_id = data.get('search_id')
+        
+        # Optional fields with defaults
+        skills = data.get('skills', '')
+        total_experience = data.get('total_experience', '0')
+        relevant_work_experience = data.get('relevant_work_experience', '0')
+        match_score = data.get('match_score', 0.0)
+        summary = data.get('summary', '')
+        call_status = data.get('call_status', 'not_called')
+        
+        if not all([name, email, phone, search_id]):
+            return jsonify({"error": "name, email, phone, and search_id are required"}), 400
+
+        try:
+            # Verify that the search_id belongs to the user
+            search_result = supabase.table("search").select("id").eq("id", search_id).eq("user_id", user_id).single().execute()
+            
+            if not search_result.data:
+                return jsonify({"error": "Search not found or access denied"}), 404
+
+            # Insert the new candidate
+            candidate_data = {
+                "name": name,
+                "email": email,
+                "phone": phone,
+                "skills": skills,
+                "search_id": search_id,
+                "user_id": user_id,
+                "total_experience": total_experience,
+                "relevant_work_experience": relevant_work_experience,
+                "match_score": match_score,
+                "summary": summary,
+                "call_status": call_status,
+                "liked": False,
+                "hiring_status": False,
+                "join_status": False
+            }
+            
+            result = supabase.table("candidates").insert(candidate_data).execute()
+            
+            if not result.data:
+                return jsonify({"error": "Failed to create candidate"}), 500
+
+            return jsonify({"success": True, "message": "Candidate added successfully", "candidate": result.data[0]}), 201
+
+        except Exception as e:
+            print(f"Add candidate error: {str(e)}")
+            return jsonify({"error": f"Failed to add candidate: {str(e)}"}), 500
+
+    elif request.method == "PUT":
+        # --- PUT: Update an existing candidate ---
+        data = request.get_json()
+        candidate_id = data.get('candidate_id')
+        
+        if not candidate_id:
+            return jsonify({"error": "candidate_id is required"}), 400
+
+        try:
+            # Verify the candidate exists and belongs to the user
+            existing = supabase.table("candidates").select("id").eq("id", candidate_id).eq("user_id", user_id).single().execute()
+            
+            if not existing.data:
+                return jsonify({"error": "Candidate not found or access denied"}), 404
+
+            # Build update object with only provided fields
+            update_data = {}
+            updatable_fields = [
+                'name', 'email', 'phone', 'skills', 'total_experience', 
+                'relevant_work_experience', 'match_score', 'summary', 
+                'call_status', 'liked', 'hiring_status', 'join_status'
+            ]
+            
+            for field in updatable_fields:
+                if field in data:
+                    update_data[field] = data[field]
+            
+            if not update_data:
+                return jsonify({"error": "No valid fields to update"}), 400
+
+            # Update the candidate
+            result = supabase.table("candidates").update(update_data).eq("id", candidate_id).eq("user_id", user_id).execute()
+            
+            if not result.data:
+                return jsonify({"error": "Failed to update candidate"}), 500
+
+            return jsonify({"success": True, "message": "Candidate updated successfully", "candidate": result.data[0]}), 200
+
+        except Exception as e:
+            print(f"Update candidate error: {str(e)}")
+            return jsonify({"error": f"Failed to update candidate: {str(e)}"}), 500
+
+    elif request.method == "DELETE":
+        data = request.get_json()
+        candidate_id = data.get('candidate_id')
+        
+        if not candidate_id:
+            return jsonify({"error": "candidate_id is required"}), 400
+
+        try:
+            # First verify the candidate exists and belongs to user
+            existing = supabase.table("candidates").select("id, name").eq("id", candidate_id).eq("user_id", user_id).execute()
+            
+            if not existing.data:
+                return jsonify({"error": "Candidate not found or access denied"}), 404
+            
+            # Now delete
+            result = supabase.table("candidates").delete().eq("id", candidate_id).eq("user_id", user_id).execute()
+            
+            return jsonify({
+                "success": True, 
+                "message": f"Candidate {existing.data[0].get('name', '')} deleted successfully"
+            }), 200
+
+        except Exception as e:
+            print(f"Delete candidate error: {str(e)}")
+            return jsonify({"error": "Failed to delete candidate"}), 500
 
 @app.route("/api/unlike-candidate", methods=["POST"])
 @jwt_required
