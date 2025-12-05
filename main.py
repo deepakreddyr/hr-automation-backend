@@ -1160,33 +1160,59 @@ def generate_questions():
         print(f"Generate questions error: {str(e)}")
         return jsonify({"error": "Failed to generate questions"}), 500
 
-@app.route("/api/custom-question", methods=["POST"])
+@app.route("/api/custom-question", methods=["GET", "POST"])
 @jwt_required
-def save_custom_question():
-    """Saves a custom question to the search table."""
+def custom_question_handler():
+    """Handles both saving (POST) and fetching (GET) a custom question for a search."""
     user = request.current_user
     user_id = user['user_id']
-    data = request.get_json()
     
-    search_id = data.get('search_id')
-    question = data.get('question')
+    if request.method == "POST":
+        # --- POST: Save Custom Question ---
+        data = request.get_json()
+        search_id = data.get('search_id')
+        question = data.get('question')
 
-    if not search_id or not question:
-        return jsonify({"error": "search_id and question are required"}), 400
+        if not search_id or not question:
+            return jsonify({"error": "search_id and question are required"}), 400
 
-    try:
-        # Update the 'search' table with the custom_question
-        result = supabase.table("search").update({"custom_question": question}).eq("id", search_id).eq("user_id", user_id).execute()
+        try:
+            # Update the 'search' table with the custom_question
+            result = supabase.table("search").update({"custom_question": question}).eq("id", search_id).eq("user_id", user_id).execute()
+            
+            # Check if any rows were updated (ensures search exists and belongs to user)
+            if not result.data:
+                return jsonify({"error": "Search not found or access denied"}), 404
+
+            return jsonify({"success": True, "message": "Custom question saved successfully"}), 200
+
+        except Exception as e:
+            print(f"Save custom question error: {str(e)}")
+            return jsonify({"error": "Failed to save custom question"}), 500
+
+    elif request.method == "GET":
+        # --- GET: Fetch Custom Question ---
+        search_id = request.args.get('search_id')
         
-        # Check if any rows were updated (ensures search exists and belongs to user)
-        if not result.data:
-            return jsonify({"error": "Search not found or access denied"}), 404
+        if not search_id:
+            return jsonify({"error": "search_id is required"}), 400
 
-        return jsonify({"success": True, "message": "Custom question saved successfully"}), 200
+        try:
+            # Select the 'custom_question' from the 'search' table
+            result = supabase.table("search").select("custom_question").eq("id", search_id).eq("user_id", user_id).single().execute()
+            
+            question_data = result.data
 
-    except Exception as e:
-        print(f"Save custom question error: {str(e)}")
-        return jsonify({"error": "Failed to save custom question"}), 500
+            if not question_data:
+                return jsonify({"error": "Search not found or access denied"}), 404
+
+            custom_question = question_data.get('custom_question')
+
+            return jsonify({"success": True, "custom_question": custom_question}), 200
+
+        except Exception as e:
+            print(f"Get custom question error: {str(e)}")
+            return jsonify({"error": "Failed to fetch custom question"}), 500
 
 @app.route('/api/results', methods=["GET"])
 @jwt_required
