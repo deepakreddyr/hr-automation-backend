@@ -54,6 +54,9 @@ ALLOWED_ORIGINS = [
     # Production deployments
     "https://hr-frontend-one.vercel.app",
     "https://hr-frontend-x9j2.onrender.com",
+    "https://www.thehireai.in",
+    "https://app.thehireai.in",
+    "https://hr-frontend-nine-theta.vercel.app",
     
     # Custom frontend URL from environment
     os.getenv("FRONTEND_URL", ""),
