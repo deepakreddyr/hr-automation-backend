@@ -227,7 +227,6 @@ def login():
             "email": email,
             "password": password
         })
-
         # Check if authentication failed
         if not auth_response or not auth_response.user:
             return jsonify({"success": False, "message": "Invalid email or password"}), 401
@@ -654,18 +653,20 @@ def create_shortlist():
 
         matches = supabase.rpc("match_resumes", {
             "query_embedding": jd_embedding,
-            "similarity_threshold": 0.60,
+            "similarity_threshold": 0.3,
             "match_count": int(num_candidates) if num_candidates else 5,
             "input_search_id": search_id
         }).execute()
 
         shortlisted = matches.data or []
+        print(f"{shortlisted} : shortlisted")
         shortlisted_texts = [c["resume_text"] for c in shortlisted if "resume_text" in c]
 
         if not shortlisted_texts:
             return jsonify({"success": False, "message": "No candidates shortlisted"}), 200
 
         # === STEP 5: Pass shortlisted resumes into AI scoring ===
+
         ai_results = get_candidate_details(shortlisted_texts, jd_text, skills)
 
         if not ai_results:
