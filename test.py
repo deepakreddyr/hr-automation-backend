@@ -19,3 +19,7 @@ prev_call = supabase.from_('calls') \
             .execute()
 
 print(prev_call)
+
+
+
+#edited by chirag
