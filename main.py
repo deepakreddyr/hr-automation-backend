@@ -113,6 +113,11 @@ VAPI_API_KEY           = os.getenv("VAPI_API_KEY")
 AGENT_ID               = os.getenv("AGENT_ID")
 VAPI_PHONE_NUMBER_ID   = os.getenv("VAPI_PHONE_NUMBER_ID")
 
+RINGG_API_KEY = os.getenv("RINGG_API_KEY")
+RINGG_AGENT_ID = os.getenv("ASSISTANT_ID")
+RINGG_NUMBER_ID = os.getenv("NUMBER_ID")
+RINGG_URL = os.getenv("RINGG_URL")
+
 url: str = os.getenv("SUPABASE_URL")
 anon_key: str = os.getenv("SUPABASE_KEY")
 service_key: str = os.getenv("SERVICE_ROLE_KEY")
@@ -1591,6 +1596,75 @@ def call_candidate(name, phone_number, skills, candidate_id, employer, hr, work_
     except Exception as err:
         print(f"Error calling candidate: {err}")
         return {"name": name, "phone": phone_number, "error": str(err)}
+    
+def call_candidate_ringg(name, phone_number, skills, candidate_id, employer, hr, 
+                        work_location, notice_period, custom_question, 
+                        contracth, remotew, context):
+    """
+    Initiate a call via Ringg AI API
+    """
+    headers = {
+        "X-API-KEY": RINGG_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    # FIX: Changed "name" to "callee_name"
+    payload = {
+        "name": name, 
+        "mobile_number": f"+91{phone_number}",
+        "agent_id": RINGG_AGENT_ID,
+        "from_number_id": RINGG_NUMBER_ID, 
+        "custom_args_values": {
+            "hr": hr,
+            "employer": employer,
+            "context": context or " ",
+            "skills": skills,
+            "days": notice_period,
+            "work_location": work_location,
+            "remote_work": remotew,
+            "contract_hiring": contracth,
+            "custom_question": custom_question,
+            "candidate_id": str(candidate_id)
+        },
+        "call_config": {
+            "idle_timeout_warning": 5,
+            "idle_timeout_end": 10,
+            "max_call_length": 240,
+            "call_retry_config": {
+                "retry_count": 3,
+                "retry_busy": 30,
+                "retry_not_picked": 30,
+                "retry_failed": 30
+            },
+            "call_time": {
+                "call_start_time": "12:00",
+                "call_end_time": "23:59",
+                "timezone": "Asia/Kolkata"
+            }
+        }
+    }
+
+    try:
+        print(f"Initiating Ringg AI call for: {name} ({phone_number})")
+        resp = requests.post(RINGG_URL, headers=headers, json=payload, timeout=30)
+        print(resp)
+        # LOGGING FOR DEBUGGING:
+        if resp.status_code != 200:
+            print(f"Ringg API Error Response: {resp.text}")
+            
+        resp.raise_for_status()
+        response_data = resp.json()
+        
+        call_id = response_data.get("data", {}).get("Unique Call ID")
+        return {
+            "name": name,
+            "status": "success",
+            "call_id": call_id,
+            "phone": phone_number
+        }
+    except Exception as err:
+        print(f"Error calling candidate via Ringg: {err}")
+        return {"name": name, "phone": phone_number, "error": str(err)}
 
 def get_previous_call_context(candidate_id):
     """
@@ -1678,6 +1752,68 @@ def schedule_call(candidate_id, phone_number, candidate_name, reschedule_time_st
         import traceback
         traceback.print_exc()
         return None
+
+# ─── Schedule Ringg Call ─────────────────────────────────────────────────────
+def schedule_ringg_call(candidate_id, phone_number, candidate_name, reschedule_time_str, call_record_id, search_id):
+    """
+    Schedule a Ringg AI call at the specified time using APScheduler
+    """
+    try:
+        # Validate inputs
+        if not call_record_id:
+            print(f"❌ Invalid call_record_id: {call_record_id}")
+            return None
+        
+        if not reschedule_time_str:
+            print(f"❌ Invalid reschedule_time_str: {reschedule_time_str}")
+            return None
+        
+        # Parse the reschedule time
+        reschedule_time = datetime.fromisoformat(reschedule_time_str)
+        
+        # Check if the time is in the past
+        if reschedule_time <= datetime.now():
+            print(f"⚠️ Reschedule time is in the past! Scheduling for 5 minutes from now instead.")
+            reschedule_time = datetime.now() + timedelta(minutes=5)
+        
+        # Create a unique job ID for Ringg calls
+        job_id = f"ringg_call_{candidate_id}_{call_record_id}_{int(datetime.now().timestamp())}"
+        
+        print(f"⏰ Scheduling Ringg call:")
+        print(f"   Candidate: {candidate_name} (ID: {candidate_id})")
+        print(f"   Time: {reschedule_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"   Job ID: {job_id}")
+        print(f"   Call Record ID: {call_record_id}")
+        
+        # Schedule the Ringg call
+        scheduler.add_job(
+            func=make_scheduled_ringg_call,
+            trigger=DateTrigger(run_date=reschedule_time),
+            args=[candidate_id, phone_number, candidate_name, search_id],
+            id=job_id,
+            name=f"Scheduled Ringg call for {candidate_name}",
+            replace_existing=True
+        )
+        
+        print(f"✅ Ringg job added to scheduler")
+        
+        # Store the job_id in the database for tracking
+        update_result = supabase.table("calls").update({
+            "scheduled_job_id": job_id
+        }).eq("id", call_record_id).execute()
+        
+        print(f"✅ Database updated with Ringg job_id")
+        
+        return job_id
+        
+    except ValueError as e:
+        print(f"❌ Invalid datetime format: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Error scheduling Ringg call: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     
 # ─── Make Scheduled VAPI Call ───────────────────────────────────────────────
 def make_scheduled_vapi_call(candidate_id, phone_number, candidate_name, search_id):
@@ -1738,6 +1874,84 @@ def make_scheduled_vapi_call(candidate_id, phone_number, candidate_name, search_
     except Exception as e:
         print(f"❌ Error making scheduled VAPI call: {e}")
         return None
+
+# ─── Make Scheduled Ringg Call ───────────────────────────────────────────────
+def make_scheduled_ringg_call(candidate_id, phone_number, candidate_name, search_id):
+    """
+    Make an automated call using Ringg AI for scheduled/rescheduled calls
+    This fetches all necessary data from the database
+    """
+    try:
+        print(f"\n{'='*80}")
+        print(f"🔔 EXECUTING SCHEDULED RINGG CALL")
+        print(f"{'='*80}")
+        print(f"Candidate: {candidate_name} (ID: {candidate_id})")
+        print(f"Phone: {phone_number}")
+        print(f"Search ID: {search_id}")
+        
+        # Fetch search data
+        da = supabase.from_('search') \
+            .select('rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id') \
+            .eq('id', search_id) \
+            .execute()
+        
+        if not da.data:
+            print(f"❌ Search ID {search_id} not found")
+            return None
+        
+        call_data = da.data[0]
+        
+        contracth = "Inform the candidate that this is a contract hiring." if call_data["contract_hiring"] else ""
+        remotew = (
+            "This is a remote work."
+            if call_data["remote_work"]
+            else "7.⁠ ⁠Ask for the candidate's current location and preferred location. "
+                 "8.⁠ ⁠If the candidate's current location is not the same as {{work_location}}, then ask if the candidate is ready to relocate, else skip this question."
+        )
+        custom_question = call_data["custom_question"] or ""
+        
+        # Get previous call context
+        context = get_previous_call_context(candidate_id)
+        print(f"📄 Call context: {context[:100] if context else 'None'}...")
+        
+        # Make the call using the Ringg AI function
+        result = call_candidate_ringg(
+            name=candidate_name,
+            phone_number=phone_number,
+            skills=call_data["key_skills"],
+            employer=call_data["rc_name"],
+            hr=call_data["hc_name"],
+            candidate_id=candidate_id,
+            work_location=call_data["company_location"],
+            notice_period=call_data["notice_period"],
+            custom_question=custom_question,
+            contracth=contracth,
+            remotew=remotew,
+            context=context
+        )
+        
+        if result.get("status") == "success":
+            print(f"✅ Scheduled Ringg call initiated successfully for {candidate_name}!")
+            print(f"   Call ID: {result.get('call_id')}")
+            
+            # Update candidate status
+            supabase.table("candidates").update({
+                "call_status": "Rescheduled Call In Progress"
+            }).eq('id', candidate_id).execute()
+            
+            print(f"{'='*80}\n")
+            return result
+        else:
+            print(f"❌ Failed to initiate scheduled Ringg call: {result}")
+            print(f"{'='*80}\n")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error making scheduled Ringg call: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"{'='*80}\n")
+        return None
     
 @app.route('/api/call-single', methods=['POST'])
 @jwt_required
@@ -1775,7 +1989,8 @@ def call_single():
     custom_question = call_data["custom_question"] if call_data["custom_question"] else ""
     context = get_previous_call_context(candidate_id)
     # ✅ Call the agent as usual (but now with `context`)
-    result = call_candidate(
+
+    result = call_candidate_ringg(
         name=name,
         phone_number=phone,
         skills=call_data["key_skills"],
@@ -1789,6 +2004,20 @@ def call_single():
         remotew=remotew,
         context=context
     )
+    # result = call_candidate(
+    #     name=name,
+    #     phone_number=phone,
+    #     skills=call_data["key_skills"],
+    #     employer=call_data["rc_name"],
+    #     hr=call_data["hc_name"],
+    #     candidate_id=candidate_id,
+    #     work_location=call_data["company_location"],
+    #     notice_period=call_data["notice_period"],
+    #     custom_question=custom_question,
+    #     contracth=contracth,
+    #     remotew=remotew,
+    #     context=context
+    # )
 
     return jsonify({'status': 'success', 'result': result}), 200
 
@@ -1820,20 +2049,34 @@ def initiate_call():
         # ✅ Reuse previous call context logic for each candidate
         context = get_previous_call_context(candidate_id)
 
-        res = call_candidate(
-            name=name,
-            phone_number=phone,
-            skills=call_data["key_skills"],
-            employer=call_data["rc_name"],
-            hr=call_data["hc_name"],
-            candidate_id=candidate_id,
-            work_location=call_data["company_location"],
-            notice_period=call_data["notice_period"],
-            custom_question=custom_question,
-            contracth=contracth,
-            remotew=remotew,
-            context=context
+        res = call_candidate_ringg(
+        name=data['name'],
+        phone_number=data['phone'],
+        skills=call_data["key_skills"],
+        employer=call_data["rc_name"],
+        hr=call_data["hc_name"],
+        candidate_id=data.get('candidate_id'),
+        work_location=call_data["company_location"],
+        notice_period=call_data["notice_period"],
+        custom_question=custom_question,
+        contracth=contracth,
+        remotew=remotew,
+        context=context
         )
+        # res = call_candidate(
+        #     name=name,
+        #     phone_number=phone,
+        #     skills=call_data["key_skills"],
+        #     employer=call_data["rc_name"],
+        #     hr=call_data["hc_name"],
+        #     candidate_id=candidate_id,
+        #     work_location=call_data["company_location"],
+        #     notice_period=call_data["notice_period"],
+        #     custom_question=custom_question,
+        #     contracth=contracth,
+        #     remotew=remotew,
+        #     context=context
+        # )
         results.append(res)
 
     return jsonify({"message": "Calls initiated", "results": results}), 200
@@ -2025,20 +2268,362 @@ def webhook():
     print(f"✅ Webhook processed successfully")
     return jsonify({"status": "received"}), 200
 
+@app.route('/ring/webhook', methods=['POST'])
+def ringg_webhook():
+    """
+    Ringg AI webhook handler - processes call events and stores data
+    Similar to VAPI webhook implementation
+    """
+    data = request.get_json()
+    
+    if not data:
+        print("❌ Received webhook with no JSON body")
+        return jsonify({"error": "No data received"}), 400
+
+    print("=" * 80)
+    print("📞 RINGG WEBHOOK RECEIVED")
+    print("=" * 80)
+    print(json.dumps(data, indent=2))
+    
+    # Extract common fields
+    event_type = data.get("event_type")
+    call_id = data.get("call_id")
+    custom_args = data.get("custom_args_values", {})
+    candidate_id = custom_args.get("candidate_id")
+    
+    print(f"\n🔔 Event Type: {event_type}")
+    print(f"📞 Call ID: {call_id}")
+    print(f"👤 Candidate ID: {candidate_id}")
+    
+    if not candidate_id:
+        print("⚠️ No candidate_id found in webhook data")
+        return jsonify({"status": "received", "warning": "No candidate_id"}), 200
+    
+    # Lookup candidate to get search_id, org_id, and user_id
+    try:
+        candidate_res = supabase.table("candidates")\
+            .select("id, search_id, org_id, call_status")\
+            .eq("id", candidate_id)\
+            .execute()
+        
+        if not candidate_res.data:
+            print(f"❌ Candidate {candidate_id} not found")
+            return jsonify({"error": "Candidate not found"}), 404
+        
+        search_id = candidate_res.data[0]["search_id"]
+        org_id = candidate_res.data[0]["org_id"]
+        previous_call_status = candidate_res.data[0].get("call_status")
+        
+        # Get user_id from search
+        search_res = supabase.table("search")\
+            .select("user_id")\
+            .eq("id", search_id)\
+            .execute()
+        
+        if not search_res.data:
+            print(f"❌ Search {search_id} not found")
+            return jsonify({"error": "Search not found"}), 404
+        
+        user_id = search_res.data[0]["user_id"]
+        
+        print(f"✅ Found candidate - Search ID: {search_id}, Org ID: {org_id}, User ID: {user_id}")
+        
+    except Exception as e:
+        print(f"❌ Error looking up candidate: {e}")
+        return jsonify({"error": "Database lookup failed"}), 500
+    
+    # ─── Handle Different Event Types ───────────────────────────────────────
+    
+    # 1. CALL COMPLETED - Initial call data storage
+    if event_type == 'call_completed':
+        print("\n📞 Processing call_completed event...")
+        
+        # Extract call details
+        duration_sec = data.get("call_duration", 0)
+        duration_minutes = duration_sec / 60 if duration_sec else 0
+        
+        # Extract phone number
+        to_number = data.get("to_number", "")
+        phone_int = int(to_number[-10:]) if len(to_number) >= 10 else 0
+        
+        # Extract name  
+        callee_name = custom_args.get("callee_name", "Unknown")
+        
+        # Extract transcript
+        transcript_list = data.get("transcript", [])
+        
+        # Status based on call completion
+        call_status = data.get("status", "completed")
+        
+        print(f"   Duration: {duration_minutes:.2f} minutes")
+        print(f"   Phone: {phone_int}")
+        print(f"   Name: {callee_name}")
+        print(f"   Status: {call_status}")
+        print(f"   Transcript items: {len(transcript_list)}")
+        
+        # Store initial call data (will be updated with analysis later)
+        # We'll update this when we get the analysis events
+        print("   ℹ️ Call completed, waiting for analysis events...")
+        
+    # 2. PLATFORM ANALYSIS COMPLETED - Ringg's AI analysis
+    elif event_type == 'platform_analysis_completed':
+        print("\n🤖 Processing platform_analysis_completed event...")
+        
+        analysis_data = data.get("analysis_data", {})
+        
+        # Extract analysis fields
+        summary = analysis_data.get("summary", "")
+        classification = analysis_data.get("classification", "")
+        callback_requested = analysis_data.get("callback_requested", False)
+        callback_time_str = analysis_data.get("callback_requested_time", "")
+        key_points = analysis_data.get("key_points", [])
+        action_items = analysis_data.get("action_items", [])
+        
+        print(f"   Summary: {summary[:100]}...")
+        print(f"   Classification: {classification}")
+        print(f"   Callback requested: {callback_requested}")
+        print(f"   Callback time: {callback_time_str}")
+        
+        # Check for pending reschedules
+        previous_reschedule = supabase.table("calls")\
+            .select("id, reschedule_status, scheduled_job_id")\
+            .eq("candidate_id", candidate_id)\
+            .eq("reschedule_status", "pending")\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+        
+        # Determine if this is a reschedule
+        is_reschedule = classification == "reschedule_requested" or callback_requested
+        
+        if is_reschedule and callback_time_str:
+            print("\n📅 RESCHEDULE DETECTED!")
+            call_status = "Re-schedule"
+            
+            # Parse the reschedule time
+            reschedule_time = parse_reschedule_time(callback_time_str)
+            print(f"   Parsed reschedule time: {reschedule_time}")
+            
+            # Cancel any previous pending reschedule
+            if previous_reschedule.data and len(previous_reschedule.data) > 0:
+                old_job_id = previous_reschedule.data[0].get("scheduled_job_id")
+                if old_job_id:
+                    try:
+                        scheduler.remove_job(old_job_id)
+                        print(f"   🗑️ Cancelled previous scheduled call: {old_job_id}")
+                    except Exception as e:
+                        print(f"   ⚠️ Could not cancel previous job: {e}")
+                
+                supabase.table("calls").update({
+                    "reschedule_status": "completed_but_rescheduled_again"
+                }).eq("id", previous_reschedule.data[0]["id"]).execute()
+            
+            # Extract call data
+            duration_sec = data.get("call_duration", 0)
+            duration_minutes = duration_sec / 60 if duration_sec else 0
+            to_number = data.get("to_number", "")
+            phone_int = int(to_number[-10:]) if len(to_number) >= 10 else 0
+            callee_name = custom_args.get("callee_name", "Unknown")
+            
+            # Format transcript
+            transcript_list = data.get("transcript", [])
+            
+            # Create structured data
+            structured_data = {
+                "classification": classification,
+                "callback_requested": callback_requested,
+                "callback_time": callback_time_str,
+                "key_points": key_points,
+                "action_items": action_items
+            }
+            
+            # Add call data to database
+            call_record_id = add_call_data(
+                transcript=json.dumps(transcript_list),
+                summary=summary,
+                structuredData=structured_data,
+                call_status=call_status,
+                success_eval="Reschedule requested",
+                phone=phone_int,
+                durationMinutes=duration_minutes,
+                name=callee_name,
+                candidate_id=int(candidate_id),
+                org_id=org_id,
+                reschedule_time=reschedule_time,
+                reschedule_status="pending"
+            )
+            
+            if not call_record_id:
+                print("   ❌ Failed to save call data")
+                return jsonify({"status": "error"}), 500
+            
+            print(f"   ✅ Call record created: {call_record_id}")
+            
+            # Schedule the automated callback
+            if reschedule_time:
+                job_id = schedule_ringg_call(
+                    candidate_id=int(candidate_id),
+                    phone_number=str(phone_int),
+                    candidate_name=callee_name,
+                    reschedule_time_str=reschedule_time,
+                    call_record_id=call_record_id,
+                    search_id=search_id
+                )
+                
+                if job_id:
+                    print(f"   ✅ Scheduled Ringg callback: {job_id}")
+                else:
+                    print(f"   ⚠️ Failed to schedule callback")
+            
+            # Deduct credits
+            deduct_credits(user_id, org_id, "rescheduled_call", reference_id=None)
+            
+        else:
+            # Call completed successfully without reschedule
+            print("\n✅ Call completed successfully (no reschedule)")
+            call_status = "Called & Answered"
+            
+            # Cancel any pending reschedules
+            if previous_reschedule.data and len(previous_reschedule.data) > 0:
+                old_job_id = previous_reschedule.data[0].get("scheduled_job_id")
+                if old_job_id:
+                    try:
+                        scheduler.remove_job(old_job_id)
+                        print(f"   🗑️ Cancelled pending reschedule: {old_job_id}")
+                    except Exception as e:
+                        print(f"   ⚠️ Could not cancel job: {e}")
+                
+                supabase.table("calls").update({
+                    "reschedule_status": "completed"
+                }).eq("id", previous_reschedule.data[0]["id"]).execute()
+            
+            # Extract call data
+            duration_sec = data.get("call_duration", 0)
+            duration_minutes = duration_sec / 60 if duration_sec else 0
+            to_number = data.get("to_number", "")
+            phone_int = int(to_number[-10:]) if len(to_number) >= 10 else 0
+            callee_name = custom_args.get("callee_name", "Unknown")
+            
+            # Format transcript
+            transcript_list = data.get("transcript", [])
+            
+            # Create structured data
+            structured_data = {
+                "classification": classification,
+                "key_points": key_points,
+                "action_items": action_items
+            }
+            
+            # Add call data to database
+            add_call_data(
+                transcript=json.dumps(transcript_list),
+                summary=summary,
+                structuredData=structured_data,
+                call_status=call_status,
+                success_eval="Call completed successfully",
+                phone=phone_int,
+                durationMinutes=duration_minutes,
+                name=callee_name,
+                candidate_id=int(candidate_id),
+                org_id=org_id,
+                reschedule_time=None,
+                reschedule_status=None
+            )
+            
+            # Deduct credits
+            deduct_credits(user_id, org_id, "ai_call", reference_id=None)
+    
+    # 3. CLIENT ANALYSIS COMPLETED - Custom analysis based on your prompts
+    elif event_type == 'client_analysis_completed':
+        print("\n📊 Processing client_analysis_completed event...")
+        
+        analysis_data = data.get("analysis_data", {})
+        
+        # Extract the custom fields from your agent
+        reschedule = analysis_data.get("reschedule", False)
+        reschedule_time_str = analysis_data.get("reschedule_time", "")
+        interested = analysis_data.get("intrested", False)  # Note: typo in API
+        total_exp = analysis_data.get("total_exp", "")
+        relevant_exp = analysis_data.get("relevant_exp", "")
+        current_ctc = analysis_data.get("current_ctc", "")
+        expected_ctc = analysis_data.get("expected_ctc", "")
+        notice_period = analysis_data.get("notice_period", "")
+        current_loc = analysis_data.get("current_loc", "")
+        expected_loc = analysis_data.get("expected_loc", "")
+        relocate = analysis_data.get("relocate", False)
+        remote = analysis_data.get("remote", False)
+        familiar = analysis_data.get("familiar", False)
+        
+        print(f"   Interested: {interested}")
+        print(f"   Reschedule: {reschedule}")
+        print(f"   Total Experience: {total_exp}")
+        print(f"   Relevant Experience: {relevant_exp}")
+        
+        # Update candidate with extracted information
+        update_data = {}
+        
+        if total_exp:
+            update_data["total_experience"] = total_exp
+        if relevant_exp:
+            update_data["relevant_work_experience"] = relevant_exp
+        
+        if update_data:
+            supabase.table("candidates").update(update_data)\
+                .eq("id", candidate_id)\
+                .execute()
+            print(f"   ✅ Updated candidate with extracted data")
+        
+        # Store this analysis in the call record
+        # Find the most recent call for this candidate
+        recent_call = supabase.table("calls")\
+            .select("id")\
+            .eq("candidate_id", candidate_id)\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+        
+        if recent_call.data:
+            # Update with client analysis data
+            call_id_to_update = recent_call.data[0]["id"]
+            
+            # Merge with existing structured data
+            existing_call = supabase.table("calls")\
+                .select("structured_call_data")\
+                .eq("id", call_id_to_update)\
+                .execute()
+            
+            if existing_call.data:
+                existing_structured = json.loads(existing_call.data[0].get("structured_call_data", "{}"))
+                existing_structured["client_analysis"] = analysis_data
+                
+                supabase.table("calls").update({
+                    "structured_call_data": json.dumps(existing_structured)
+                }).eq("id", call_id_to_update).execute()
+                
+                print(f"   ✅ Updated call record with client analysis")
+    
+    else:
+        print(f"\n⚠️ Unknown event type: {event_type}")
+    
+    print("=" * 80)
+    print("✅ Webhook processed successfully")
+    print("=" * 80)
+    
+    return jsonify({"status": "received"}), 200
+
 @app.route("/api/transcript/<int:candidate_id>")
 @jwt_required
 def api_transcript(candidate_id):
     try:
         import json
 
-        # 1. Fetch candidate (remains the same)
+        # 1. Fetch candidate
         candidate_res = supabase.table("candidates").select("*").eq("id", candidate_id).execute()
         if not candidate_res.data:
             return jsonify({"error": "Candidate not found"}), 404
         candidate = candidate_res.data[0]
 
-        # 2. Fetch ALL calls for the candidate (MODIFIED)
-        # Assuming we want to sort by ID or a 'created_at' column to get call order
+        # 2. Fetch ALL calls for the candidate
         call_res = supabase.table("calls").select("*").eq("candidate_id", candidate_id).order("id", desc=False).execute()
         all_calls_raw = call_res.data or []
         
@@ -2053,32 +2638,56 @@ def api_transcript(candidate_id):
                 except json.JSONDecodeError:
                     structured_data = {}
 
-            # Parse transcript
-            transcript_text = call.get("transcript", "")
+            # Parse transcript - Handle both formats
+            transcript_raw = call.get("transcript", "")
             transcript = []
-            for line in transcript_text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("AI:"):
-                    transcript.append({"speaker": "ai", "message": line[3:].strip(), "timestamp": ""})
-                elif line.startswith("User:") or line.startswith("You:"):
-                    transcript.append({"speaker": "candidate", "message": line.split(":", 1)[1].strip(), "timestamp": ""})
+            
+            # Try to parse as JSON array first (new format)
+            if isinstance(transcript_raw, str):
+                try:
+                    parsed = json.loads(transcript_raw)
+                    if isinstance(parsed, list):
+                        # New format: array of objects with 'bot' and 'user' keys
+                        for item in parsed:
+                            if isinstance(item, dict):
+                                if 'bot' in item and item['bot']:
+                                    transcript.append({"speaker": "ai", "message": item['bot'], "timestamp": ""})
+                                if 'user' in item and item['user']:
+                                    transcript.append({"speaker": "candidate", "message": item['user'], "timestamp": ""})
+                    else:
+                        # If it's not a list, fall back to text parsing
+                        raise ValueError("Not a list")
+                except (json.JSONDecodeError, ValueError):
+                    # Old format: multi-line text with AI:/User: prefixes
+                    for line in transcript_raw.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("AI:"):
+                            transcript.append({"speaker": "ai", "message": line[3:].strip(), "timestamp": ""})
+                        elif line.startswith("User:") or line.startswith("You:"):
+                            transcript.append({"speaker": "candidate", "message": line.split(":", 1)[1].strip(), "timestamp": ""})
+            elif isinstance(transcript_raw, list):
+                # Already parsed as list
+                for item in transcript_raw:
+                    if isinstance(item, dict):
+                        if 'bot' in item and item['bot']:
+                            transcript.append({"speaker": "ai", "message": item['bot'], "timestamp": ""})
+                        if 'user' in item and item['user']:
+                            transcript.append({"speaker": "candidate", "message": item['user'], "timestamp": ""})
 
             # Parse evaluation
             eval_raw = call.get("evaluation")
             evaluation = {}
             if eval_raw:
                 try:
-                    # Attempt to parse as JSON first
                     evaluation = json.loads(eval_raw)
                 except:
-                    # Fallback to simple summary if it's not valid JSON
                     evaluation = {"summary": eval_raw}
 
             # Append the structured call data to the list
             processed_calls.append({
-                "id": call.get("id"), # Keep the call ID for tracking
+                "id": call.get("id"),
                 "transcript": transcript,
                 "evaluation": evaluation,
                 "structured": structured_data,
@@ -2086,7 +2695,7 @@ def api_transcript(candidate_id):
                     "duration": call.get("call_duration"),
                     "status": call.get("status"),
                     "summary": call.get("call_summary", ""),
-                    "timestamp": call.get("created_at") # Assuming a timestamp column exists
+                    "timestamp": call.get("created_at")
                 }
             })
 
@@ -2106,7 +2715,7 @@ def api_transcript(candidate_id):
                 "hiringStatus": candidate.get("hiring_status"),
                 "joinStatus": candidate.get("join_status")
             },
-            "calls": processed_calls, # Now returns a list of calls
+            "calls": processed_calls,
         })
 
     except Exception as e:
