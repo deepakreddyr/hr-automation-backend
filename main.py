@@ -19,6 +19,7 @@ import fitz
 from flask_cors import CORS
 import requests
 from aiparser import shortlist_candidates,scrape,get_candidate_details,get_questions,get_embedding,parse_reschedule_time
+from ai import evaluate_candidates_bulk
 from supabase import create_client, Client
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -606,7 +607,6 @@ def create_shortlist():
         resume_link = request.form.get("resumeLink")
         jd_file = request.files.get("jdFile")
 
-        # Extra fields from wizard
         hiring_company = request.form.get("hiringCompany")
         hr_company = request.form.get("hrCompany")
         company_location = request.form.get("companyLocation")
@@ -672,7 +672,7 @@ def create_shortlist():
 
         # === STEP 5: Pass shortlisted resumes into AI scoring ===
 
-        ai_results = get_candidate_details(shortlisted_texts, jd_text, skills)
+        ai_results = evaluate_candidates_bulk(shortlisted_texts, jd_text, skills)
 
         if not ai_results:
             return jsonify({"success": False, "message": "No candidates after AI scoring"}), 200
@@ -680,37 +680,44 @@ def create_shortlist():
         # === STEP 6: Insert AI-enriched candidates into table ===
         inserts = []
         for cand in ai_results:
+            # Extract match score from overall_match_score
+            match_score = cand.get("overall_match_score", 0)
+            
+            # Only process candidates with match score > 70
+            if match_score <= 70:
+                continue
+            
+            # --- sanitize phone number ---
+            phone_raw = cand.get("phone")
+            phone_clean = None
+            if phone_raw:
+                import re
+                digits = re.sub(r"\D", "", str(phone_raw))
+                if digits:
+                    try:
+                        phone_clean = int(digits)
+                    except Exception:
+                        phone_clean = None
+
+            # Extract skills from experience_in_skills
+            experience_in_skills = cand.get("experience_in_skills", {})
+            skills_list = ", ".join(experience_in_skills.keys()) if experience_in_skills else ""
+
             insert_obj = {
                 "user_id": user_id,
                 "org_id": org_id,
                 "search_id": search_id,
-                "match_score": cand.get("match_score"),
+                "match_score": match_score,
+                "name": cand.get("candidate_name"),
+                "phone": phone_clean,
+                "email": cand.get("email"),
+                "summary": cand.get("agent_checks", {}).get("agent_1_summary", ""),
+                "skills": skills_list,
+                "skills_experience": experience_in_skills,
+                "total_experience": cand.get("total_work_experience_years"),
+                "relevant_work_experience": cand.get("relevant_experience_years"),
+                "analysis_report": cand  # Store the full evaluation JSON
             }
-
-            if cand.get("match_score", 0) > 70:
-                # --- sanitize phone number ---
-                phone_raw = cand.get("phone")
-                phone_clean = None
-                if phone_raw:
-                    import re
-                    digits = re.sub(r"\D", "", str(phone_raw))
-                    if digits:
-                        try:
-                            phone_clean = int(digits)
-                        except Exception:
-                            phone_clean = None
-
-                insert_obj.update({
-                    "name": cand.get("name"),
-                    "phone": phone_clean,  # stored as bigint-safe
-                    "email": cand.get("email"),
-                    "summary": cand.get("job_summary"),
-                    "skills_experience": cand.get("experience_in_skills"),
-                    "total_experience": cand.get("total_experience"),
-                    "relevant_work_experience": cand.get("relevant_experience"),
-                })
-            else:
-                insert_obj["summary"] = cand.get("reason_to_reject")
 
             inserts.append(insert_obj)
 
@@ -726,6 +733,7 @@ def create_shortlist():
             "resumes_processed": len(raw_resumes),
             "shortlisted_candidates": ai_results,
         }), 200
+
 
     except Exception as e:
         print(f"Error in /api/shortlist/simple: {e}")
@@ -964,7 +972,7 @@ def process_candidates(search_id):
         print(f"Processing {len(resume_dict)} total resumes, combined length: {len(all_resumes)}")
         
         # Get candidate details from AI (process all candidates together)
-        candidate_data = get_candidate_details(all_resumes, jd, skills)
+        candidate_data = evaluate_candidates_bulk(all_resumes, jd, skills)
         print(f"AI returned {len(candidate_data) if isinstance(candidate_data, list) else 0} candidates")
         
         if not candidate_data or not isinstance(candidate_data, list):
@@ -1002,11 +1010,11 @@ def process_candidates(search_id):
         inserted_count = 0
         for candidate in unique_candidates:
             try:
-                match_score = candidate.get("match_score", 0)
+                match_score = candidate.get("overall_match_score", 0)
                 if match_score <= 70:
                     continue
                 
-                name = candidate.get("name", "").strip()
+                name = candidate.get("candidate_name", "").strip()
                 email = candidate.get("email", "").strip().lower()
                 phone_raw = candidate.get("phone", "")
                 phone_digits = "".join(filter(str.isdigit, phone_raw))[-10:] if phone_raw else ""
@@ -1026,14 +1034,15 @@ def process_candidates(search_id):
                     "email": email,
                     "phone": phone,
                     "skills": skills_list,
-                    "summary": candidate.get("job_summary", ""),
+                    "summary": candidate.get("agent_checks", {}).get("agent_1_summary", ""),
                     "skills_experience": experience_in_skills,
                     "search_id": search_id,
                     "user_id": user_id,
-                    "total_experience": candidate.get("total_experience", ""),
-                    "relevant_work_experience": candidate.get("relevant_experience", ""),
+                    "total_experience": candidate.get("total_work_experience_years", ""),
+                    "relevant_work_experience": candidate.get("relevant_experience_years", ""),
                     "match_score": match_score,
-                    "org_id": org_id
+                    "org_id": org_id,
+                    "analysis_report": candidate  # Store the full evaluation JSON
                 }
                 
                 # Add history_id if it exists
@@ -1610,10 +1619,11 @@ def call_candidate_ringg(name, phone_number, skills, candidate_id, employer, hr,
 
     # FIX: Changed "name" to "callee_name"
     payload = {
-        "name": name, 
+        "name": name,
+        "callee_name": name,
         "mobile_number": f"+91{phone_number}",
         "agent_id": RINGG_AGENT_ID,
-        "from_number_id": RINGG_NUMBER_ID, 
+        "from_number_id": RINGG_NUMBER_ID,
         "custom_args_values": {
             "hr": hr,
             "employer": employer,
@@ -2708,12 +2718,14 @@ def api_transcript(candidate_id):
                 "skills": candidate.get("skills"),
                 "matchScore": candidate.get("match_score"),
                 "callStatus": candidate.get("call_status"),
+                "summary": candidate.get("summary"),
                 "totalExperience": candidate.get("total_experience"),
                 "relevantExperience": candidate.get("relevant_work_experience"),
-                "summary": candidate.get("summary"),
+                "skillsExperience": candidate.get("skills_experience"),
                 "liked": candidate.get("liked"),
                 "hiringStatus": candidate.get("hiring_status"),
-                "joinStatus": candidate.get("join_status")
+                "joinStatus": candidate.get("join_status"),
+                "analysisReport": candidate.get("analysis_report")  # Add the AI evaluation report
             },
             "calls": processed_calls,
         })
@@ -3309,7 +3321,7 @@ def internal_error(error):
 if __name__ == "__main__":
     if IS_PRODUCTION:
         # Production server configuration
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5001)), debug=False)
     else:
         # Development server configuration
-        app.run(debug=True, host="127.0.0.1", port=5000)
+        app.run(debug=True, host="127.0.0.1", port=5001)
