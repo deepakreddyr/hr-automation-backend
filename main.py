@@ -8,6 +8,8 @@ from flask import (
     Flask, render_template, request,
     redirect, url_for, jsonify, flash, make_response
 )
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from helpers import correct_shortlisted_indices
 from dashboard_data import (
     get_dashboard_data,
@@ -34,49 +36,48 @@ IS_PRODUCTION = os.getenv("FLASK_ENV") == "production" or os.getenv("ENVIRONMENT
 
 # ─── JWT Configuration ─────────────────────────────────────────────────────
 
-# JWT Secret Key - Use a strong secret key
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-jwt-key-change-this-in-production")
+# JWT Secret Key - FORCED environment variable in production
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if IS_PRODUCTION and not JWT_SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY environment variable MUST be set in production")
+if not JWT_SECRET_KEY:
+    JWT_SECRET_KEY = "development-only-insecure-key-change-this"
+
 JWT_ALGORITHM = "HS256"
-JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=690)  # Access token expires in 24 hours
-JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=800)  # Refresh token expires in 30 days
+JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)  # Reduced from 690h to 2h for security
+JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)  # Reduced from 800d to 30d
 
 # ─── Unified CORS Configuration (Works for Both Localhost & Vercel) ─────────────
 
-# Unified Origins - Works for both scenarios
-ALLOWED_ORIGINS = [
-    # Localhost development
+# Development-only origins
+DEV_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:8080", 
-    "http://localhost:5173",    # Vite default
+    "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:8080",
     "http://127.0.0.1:5173",
-    
-    # Production deployments
+]
+
+# Production-only origins
+PROD_ORIGINS = [
     "https://hr-frontend-one.vercel.app",
     "https://hr-frontend-x9j2.onrender.com",
     "https://www.thehireai.in",
     "https://app.thehireai.in",
     "https://hr-frontend-nine-theta.vercel.app",
-    
-    # Custom frontend URL from environment
-    os.getenv("FRONTEND_URL", ""),
 ]
 
-PRODUCTION_ORIGINS = [
-    os.getenv("FRONTEND_URL", "https://yourdomain.com"),
-    "https://hr-frontend-one.vercel.app",
-    "https://hr-frontend-x9j2.onrender.com",
-    "http://localhost:8080",
-    "http://127.0.0.1:8080"
-]
+# Add custom frontend URL if it exists
+frontend_url = os.getenv("FRONTEND_URL")
+if frontend_url:
+    PROD_ORIGINS.append(frontend_url)
 
-# Debug output
-print("=== UNIFIED CORS CONFIGURATION ===")
-print(f"Environment: {'PRODUCTION' if IS_PRODUCTION else 'DEVELOPMENT'}")
-print(f"Allowed origins: {ALLOWED_ORIGINS}")
-print("==================================")
+# Final origins list based on environment
+ALLOWED_ORIGINS = PROD_ORIGINS if IS_PRODUCTION else (PROD_ORIGINS + DEV_ORIGINS)
 
+# Log CORS status structure for verification
+print(f"=== CORS CONFIGURATION: {'PRODUCTION' if IS_PRODUCTION else 'DEVELOPMENT'} POLICY ENFORCED ===")
 
 
 # Initialize APScheduler
@@ -102,8 +103,23 @@ CORS(
     max_age=86400  # Cache preflight requests for 24 hours
 )
 
-# Secure secret key (still needed for Flask operations)
-app.secret_key = os.getenv("SECRET_KEY", "xJ7vK9mQ2nR8pL6wE4tY1uI0oP3aS5dF7gH9jK2lM6nB8vC1xZ4qW7eR3tY6uI9o")
+# ─── Rate Limiting ────────────────────────────────────────────────────────────
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",
+)
+
+# ─── Secret Key Security ──────────────────────────────────────────────────────
+
+# Secure secret key - FORCED environment variable in production
+app_secret = os.getenv("SECRET_KEY")
+if IS_PRODUCTION and not app_secret:
+    raise RuntimeError("SECRET_KEY environment variable MUST be set in production")
+app.secret_key = app_secret or "development-only-secret"
+
 
 print(f"JWT Authentication configured with {JWT_ACCESS_TOKEN_EXPIRES} access token expiry")
 
@@ -214,6 +230,7 @@ def health_check():
     return jsonify({"status": "healthy", "environment": "production" if IS_PRODUCTION else "development"})
 
 @app.route("/login", methods=["GET","POST"])
+@limiter.limit("5 per minute")  # Stricter limit for authentication to prevent brute force
 def login():
     try:
         # Handle both form data and JSON data
