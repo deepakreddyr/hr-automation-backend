@@ -8,6 +8,7 @@ from flask import (
     Flask, render_template, request,
     redirect, url_for, jsonify, flash, make_response
 )
+import time 
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from helpers import correct_shortlisted_indices
@@ -244,7 +245,7 @@ def login():
 
         if not email or not password:
             return jsonify({"success": False, "message": "Email and password required"}), 400
-
+            
         # Authenticate with Supabase
         auth_response = supabase.auth.sign_in_with_password({
             "email": email,
@@ -487,6 +488,7 @@ def shortlist():
         "status": "process",
         "search_name": search_name,
         "search_type": "Naukri",
+        "shortlist_count": len(corrected_shortlist),
         # New fields
         "rc_name": hiring_company,
         "company_location": company_location,
@@ -566,6 +568,7 @@ def shortlist():
             
             # Update search_data with merged list
             search_data["shortlisted_index"] = json.dumps(merged_shortlist)
+            search_data["shortlist_count"] = len(merged_shortlist)
             search_data["process_state"] = json.dumps(updated_process_state)
             search_data["status"] = "process"  # Reset to process status
             
@@ -621,7 +624,8 @@ def create_shortlist():
         job_role = request.form.get("jobRole")
         skills = request.form.get("skills")
         num_candidates = request.form.get("numCandidates")
-        resume_link = request.form.get("resumeLink")
+        resume_link = request.form.get("resumeLink", "").strip() or None
+        excel_file = request.files.get("excelFile")
         jd_file = request.files.get("jdFile")
 
         hiring_company = request.form.get("hiringCompany")
@@ -631,8 +635,10 @@ def create_shortlist():
         remote_work = request.form.get("remoteWork", "false").lower() == "true"
         contract_hiring = request.form.get("contractHiring", "false").lower() == "true"
 
-        if not search_name or not job_role or not skills or not resume_link or not user_id:
-            return jsonify({"success": False, "message": "Missing required fields"}), 400
+        # Require either a Google Drive / sheet link OR an uploaded Excel/CSV file
+        has_resume_source = bool(resume_link) or bool(excel_file and excel_file.filename)
+        if not search_name or not job_role or not skills or not has_resume_source or not user_id:
+            return jsonify({"success": False, "message": "Missing required fields. Provide either a resume link or an Excel/CSV file."}), 400
 
         # === STEP 1: Extract JD text ===
         jd_text = ""
@@ -648,7 +654,7 @@ def create_shortlist():
             "job_role": job_role,
             "key_skills": skills,
             "job_description": jd_text,
-            "resume_link": resume_link,
+            "resume_link": resume_link,  # may be None when Excel file is used
             "noc": int(num_candidates) if num_candidates else None,
             "rc_name": hiring_company,
             "hc_name": hr_company,
@@ -658,14 +664,23 @@ def create_shortlist():
             "contract_hiring": contract_hiring,
             "status": "results",
             "processed": True,
-            "search_type": "Simple"
+            "search_type": "Simple",
+            "shortlist_count": 0
         }).execute()
         search_id = response.data[0]["id"]
 
-        # === STEP 3: Extract resumes ===
+        # === STEP 3: Extract resumes (Drive link OR uploaded Excel/CSV) ===
         raw_resumes = []
-        for batch in extractor.process_drive_spreadsheet_optimized(resume_link, user_id, search_id):
-            raw_resumes.extend(batch)
+        if resume_link:
+            # Google Drive spreadsheet / direct URL path
+            for batch in extractor.process_drive_spreadsheet_optimized(resume_link, user_id, search_id):
+                raw_resumes.extend(batch)
+        else:
+            # Uploaded Excel / CSV file path
+            excel_bytes = excel_file.read()
+            excel_filename = excel_file.filename
+            for batch in extractor.process_excel_file_optimized(excel_bytes, excel_filename, user_id, search_id):
+                raw_resumes.extend(batch)
 
         if not raw_resumes:
             return jsonify({"success": False, "message": "No resumes processed"}), 500
@@ -675,7 +690,7 @@ def create_shortlist():
 
         matches = supabase.rpc("match_resumes", {
             "query_embedding": jd_embedding,
-            "similarity_threshold": 0.3,
+            "similarity_threshold": 0.5,
             "match_count": int(num_candidates) if num_candidates else 5,
             "input_search_id": search_id
         }).execute()
@@ -742,6 +757,12 @@ def create_shortlist():
             supabase.table("candidates").insert(inserts).execute()
             deduct_credits(user_id, org_id, "search", reference_id=search_id)
             deduct_credits(user_id,org_id, "process_candidate", reference_id=None)
+        
+        # Update search record with the actual count of shortlisted candidates
+        try:
+            supabase.table("search").update({"shortlist_count": len(inserts)}).eq("id", search_id).execute()
+        except Exception as e:
+            print(f"Error updating shortlist_count: {e}")
 
         return jsonify({
             "success": True,

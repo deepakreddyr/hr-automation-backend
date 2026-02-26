@@ -2,7 +2,7 @@ import os
 import json
 from openai import OpenAI
 from dotenv import load_dotenv
-
+import time
 # ------------------------------------------------------------------
 # 1. SETUP: API Key and Client
 # ------------------------------------------------------------------
@@ -184,69 +184,107 @@ def run_evaluation():
 # ------------------------------------------------------------------
 # 5. BULK EVALUATION FUNCTION FOR MAIN.PY
 # ------------------------------------------------------------------
-def evaluate_candidates_bulk(candidate_resumes, job_description, required_skills):
+def evaluate_candidates_bulk(candidate_resumes, job_description, required_skills, batch_size=3):
     """
     Evaluate multiple candidates against a job description.
-    
-    Args:
-        candidate_resumes: List of resume text strings or single concatenated string
-        job_description: Job description text
-        required_skills: Comma-separated string or list of required skills
-    
-    Returns:
-        List of candidate evaluation dictionaries matching the bulk_evaluations structure
+    Processes candidates in small batches to stay under GPT-4o TPM limits.
+
+    TPM Budget (30,000 limit):
+      - System prompt:   ~500 tokens
+      - JD + skills:     ~1,000 tokens
+      - Per resume:      ~1,500 tokens (truncated)
+      - Output per cand: ~500 tokens
+      ─────────────────────────────────────
+      Safe batch size:   3 candidates (~9,000 tokens input + ~1,500 output = ~10,500/call)
     """
+
+    MAX_RESUME_CHARS = 4000  # ~1,000 tokens per resume — enough for scoring, avoids bloat
+
     try:
-        # Handle both list and concatenated string inputs
+        # ── Normalize input to list of dicts ──────────────────────────────────
         if isinstance(candidate_resumes, list):
             candidates_data = [
                 {
                     "id": f"cand_{i+1}",
-                    "resume_text": resume
+                    "resume_text": resume[:MAX_RESUME_CHARS]  # truncate here
                 }
                 for i, resume in enumerate(candidate_resumes)
             ]
         else:
-            # Split concatenated resumes
             resume_texts = candidate_resumes.split("\n\n--- RESUME SEPARATOR ---\n\n")
             candidates_data = [
                 {
                     "id": f"cand_{i+1}",
-                    "resume_text": resume
+                    "resume_text": resume[:MAX_RESUME_CHARS]
                 }
                 for i, resume in enumerate(resume_texts) if resume.strip()
             ]
-        
-        # Construct the user message payload
-        user_message_payload = {
-            "job_description": job_description,
-            "required_skills": required_skills,
-            "candidates": candidates_data
-        }
-        
-        print(f"Evaluating {len(candidates_data)} candidates...")
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",  # Using gpt-4o for complex logic/JSON
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(user_message_payload)}
-            ],
-            temperature=0.1
-        )
-        
-        # Parse the JSON response
-        result_json = json.loads(response.choices[0].message.content)
-        
-        # Return the bulk_evaluations array
-        if "bulk_evaluations" in result_json:
-            print(f"✅ Successfully evaluated {len(result_json['bulk_evaluations'])} candidates")
-            return result_json["bulk_evaluations"]
-        else:
-            print("❌ ERROR: Response missing 'bulk_evaluations' key")
-            return []
-            
+
+        print(f"Evaluating {len(candidates_data)} candidates in batches of {batch_size}...")
+
+        all_results = []
+
+        # ── Split into batches ────────────────────────────────────────────────
+        for batch_start in range(0, len(candidates_data), batch_size):
+            batch = candidates_data[batch_start: batch_start + batch_size]
+            batch_num = (batch_start // batch_size) + 1
+            total_batches = (len(candidates_data) + batch_size - 1) // batch_size
+
+            print(f"Processing batch {batch_num}/{total_batches} ({len(batch)} candidates)...")
+
+            user_message_payload = {
+                "job_description": job_description,
+                "required_skills": required_skills,
+                "candidates": batch
+            }
+
+            # ── Call with retry + exponential backoff ─────────────────────────
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        response_format={"type": "json_object"},
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": json.dumps(user_message_payload)}
+                        ],
+                        temperature=0.1
+                    )
+
+                    result_json = json.loads(response.choices[0].message.content)
+
+                    if "bulk_evaluations" in result_json:
+                        batch_results = result_json["bulk_evaluations"]
+                        all_results.extend(batch_results)
+                        print(f"✅ Batch {batch_num}/{total_batches} — {len(batch_results)} candidates evaluated")
+                    else:
+                        print(f"❌ Batch {batch_num}: Response missing 'bulk_evaluations' key")
+
+                    break  # success, exit retry loop
+
+                except Exception as e:
+                    error_str = str(e)
+                    if '429' in error_str and attempt < max_retries - 1:
+                        wait = 2 ** (attempt + 2)  # 4s, 8s, 16s
+                        print(f"⚠️  Rate limit hit on batch {batch_num}, waiting {wait}s before retry...")
+                        time.sleep(wait)
+                    else:
+                        print(f"❌ Batch {batch_num} failed after {attempt + 1} attempts: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        break  # skip this batch, continue with next
+
+            # ── Delay between batches to respect TPM limit ────────────────────
+            # 30,000 TPM ÷ ~10,500 tokens per batch ≈ ~2.8 batches/min safely
+            # 22s gap between batches keeps us under the limit comfortably
+            if batch_start + batch_size < len(candidates_data):
+                print(f"⏳ Waiting 22s before next batch to respect TPM limit...")
+                time.sleep(22)
+
+        print(f"✅ Total evaluated: {len(all_results)} candidates")
+        return all_results
+
     except Exception as e:
         print(f"❌ Error in evaluate_candidates_bulk: {e}")
         import traceback
