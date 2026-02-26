@@ -45,7 +45,7 @@ if not JWT_SECRET_KEY:
     JWT_SECRET_KEY = "development-only-insecure-key-change-this"
 
 JWT_ALGORITHM = "HS256"
-JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)  # Reduced from 690h to 2h for security
+JWT_ACCESS_TOKEN_EXPIRES = timedelta(weeks=2)  # Increased to 2 weeks as per request
 JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)  # Reduced from 800d to 30d
 
 # ─── Unified CORS Configuration (Works for Both Localhost & Vercel) ─────────────
