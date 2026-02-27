@@ -231,7 +231,7 @@ def health_check():
     return jsonify({"status": "healthy", "environment": "production" if IS_PRODUCTION else "development"})
 
 @app.route("/login", methods=["GET","POST"])
-@limiter.limit("5 per minute")  # Stricter limit for authentication to prevent brute force
+# @limiter.limit("5 per minute")  # Stricter limit for authentication to prevent brute force
 def login():
     try:
         # Handle both form data and JSON data
@@ -3359,7 +3359,7 @@ def internal_error(error):
 if __name__ == "__main__":
     if IS_PRODUCTION:
         # Production server configuration
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5001)), debug=False)
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
     else:
         # Development server configuration
-        app.run(debug=True, host="127.0.0.1", port=5001)
+        app.run(debug=True, host="127.0.0.1", port=5000)

@@ -578,12 +578,28 @@ class MemoryOptimizedResumeExtractor:
                     results[result_idx]['embedding_generated'] = True
 
         # ── Phase 3: Bulk DB insert ────────────────────────────────────────────
+        def sanitize_phone(phone_val):
+            """Convert phone to int or None. Prevents bigint parse errors in Supabase."""
+            if not phone_val:
+                return None
+            phone_str = str(phone_val).strip()
+            if not phone_str:
+                return None
+            import re
+            digits = re.sub(r"\D", "", phone_str)
+            if not digits:
+                return None
+            try:
+                return int(digits)
+            except (ValueError, OverflowError):
+                return None
+
         records_to_insert = [
             {
                 "user_id": r['user_id'],
                 "name": r['name'],
                 "email": r['email'],
-                "phone": r['phone'],
+                "phone": sanitize_phone(r['phone']),
                 "resume_text": r['resume_text'],
                 "embedding": r['embedding'],
                 "search_id": search_id
