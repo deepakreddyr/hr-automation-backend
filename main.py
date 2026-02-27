@@ -67,6 +67,13 @@ PROD_ORIGINS = [
     "https://www.thehireai.in",
     "https://app.thehireai.in",
     "https://hr-frontend-nine-theta.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:8080", 
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:5173",
+
 ]
 
 # Add custom frontend URL if it exists
@@ -247,6 +254,8 @@ def login():
             return jsonify({"success": False, "message": "Email and password required"}), 400
             
         # Authenticate with Supabase
+        print(email)
+        print(password)
         auth_response = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
