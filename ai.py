@@ -676,7 +676,7 @@ def evaluate_candidates_bulk(
                 f"{r.get('scoring_tier', '?'):<12} "
                 f"{r.get('candidate_name', 'Unknown')}"
             )
-
+        print("final_ranked",final_ranked)
         return final_ranked
 
     except Exception as e:

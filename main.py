@@ -699,9 +699,9 @@ def create_shortlist():
 
         matches = supabase.rpc("match_resumes", {
             "query_embedding": jd_embedding,
-            "similarity_threshold": 0.5,
-            "match_count": int(num_candidates) if num_candidates else 5,
+            "similarity_threshold": 0.6,
             "input_search_id": search_id
+            # match_count omitted — returns ALL candidates above 0.6
         }).execute()
 
         shortlisted = matches.data or []
@@ -1330,7 +1330,8 @@ def results():
                 "match_score": person.get("match_score") or 0,
                 "liked": person.get("liked") or False,
                 "join_status": person.get("join_status") or False,
-                "status": person.get("status") or "pending"
+                "status": person.get("status") or "pending",
+                "analysis_report": person.get("analysis_report") or ""
             }
             shortlisted_candidates.append(candidate)
             
