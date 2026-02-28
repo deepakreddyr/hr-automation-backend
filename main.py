@@ -697,11 +697,10 @@ def create_shortlist():
         # === STEP 4: Embedding-based shortlist ===
         jd_embedding = get_embedding(jd_text)
 
-        matches = supabase.rpc("match_resumes", {
+        matches = supabase.rpc("match_resumes_updated", {
             "query_embedding": jd_embedding,
             "similarity_threshold": 0.6,
             "input_search_id": search_id
-            # match_count omitted — returns ALL candidates above 0.6
         }).execute()
 
         shortlisted = matches.data or []
