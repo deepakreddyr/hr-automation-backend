@@ -21,6 +21,7 @@ def get_embedding(text: str):
         model="text-embedding-3-small",
         input=text
     )
+    print(f"{response} : embedding")
     return response.data[0].embedding
 # ----------------------------
 # Candidate Evaluation

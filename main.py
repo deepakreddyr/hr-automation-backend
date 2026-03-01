@@ -696,7 +696,7 @@ def create_shortlist():
 
         # === STEP 4: Embedding-based shortlist ===
         jd_embedding = get_embedding(jd_text)
-
+        print(f"{jd_embedding} : jd_embedding")
         matches = supabase.rpc("match_resumes", {
             "query_embedding": jd_embedding,
             "similarity_threshold": 0.6,
@@ -725,8 +725,8 @@ def create_shortlist():
             match_score = cand.get("overall_match_score", 0)
             
             # Only process candidates with match score > 70
-            if match_score <= 70:
-                continue
+            # if match_score <= 70:
+            #     continue
             
             # --- sanitize phone number ---
             phone_raw = cand.get("phone")
