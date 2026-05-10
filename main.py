@@ -520,6 +520,9 @@ def shortlist():
             
             # Get existing data
             existing_data = existing_search.data[0]
+            existing_shortlist = existing_data.get("shortlisted_index")
+            existing_process_state = existing_data.get("process_state")
+            
             # Parse existing data with safety checks
             if not existing_shortlist:
                 existing_shortlist = []
