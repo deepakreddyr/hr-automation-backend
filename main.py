@@ -1695,7 +1695,7 @@ def call_candidate_ringg(name, phone_number, skills, candidate_id, employer, hr,
                 "retry_failed": 30
             },
             "call_time": {
-                "call_start_time": "12:00",
+                "call_start_time": "00:00",
                 "call_end_time": "23:59",
                 "timezone": "Asia/Kolkata"
             }
@@ -1704,8 +1704,9 @@ def call_candidate_ringg(name, phone_number, skills, candidate_id, employer, hr,
 
     try:
         print(f"Initiating Ringg AI call for: {name} ({phone_number})")
+        print(f"ringg payload: {payload}")
         resp = requests.post(RINGG_URL, headers=headers, json=payload, timeout=30)
-        print(resp)
+        print(resp.json())
         # LOGGING FOR DEBUGGING:
         if resp.status_code != 200:
             print(f"Ringg API Error Response: {resp.text}")
@@ -2138,6 +2139,267 @@ def initiate_call():
         results.append(res)
 
     return jsonify({"message": "Calls initiated", "results": results}), 200
+
+
+# ─── Ringg Native Bulk Call Endpoints ─────────────────────────────────────────
+
+RINGG_BASE_URL = "https://prod-api.ringg.ai/ca/api/v0"
+
+@app.route("/api/bulk-call", methods=["POST"])
+@jwt_required
+def initiate_bulk_call():
+    """
+    Initiates a bulk call campaign via Ringg's native bulk calling API.
+    Steps:
+      1. Build CSV from candidates list
+      2. Upload contact list to Ringg → get list_id (bulk_list_id)
+      3. Trigger the bulk call via Ringg
+    Returns { bulk_list_id, total } for frontend to start polling.
+    """
+    data = request.get_json()
+    candidates = data.get("candidates", [])
+    search_id = data.get("search_id")
+    max_concurrent_calls = data.get("max_concurrent_calls", 2)
+
+    if not candidates or not search_id:
+        return jsonify({"error": "candidates and search_id are required"}), 400
+
+    # ── Fetch search/job details ──────────────────────────────────────────────
+    try:
+        da = supabase.from_("search") \
+            .select("rc_name,hc_name,remote_work,contract_hiring,company_location,notice_period,key_skills,custom_question,id") \
+            .eq("id", search_id) \
+            .execute()
+
+        if not da.data:
+            return jsonify({"error": "Search not found"}), 404
+
+        call_data = da.data[0]
+    except Exception as e:
+        print(f"Error fetching search data: {e}")
+        return jsonify({"error": "Failed to fetch search data"}), 500
+
+    contracth = "Inform the candidate that this is a contract hiring." if call_data.get("contract_hiring") else ""
+    remotew = (
+        "This is a remote work."
+        if call_data.get("remote_work")
+        else "7. Ask for the candidate's current location and preferred location. "
+             "8. If the candidate's current location is not the same as {{work_location}}, then ask if the candidate is ready to relocate, else skip this question."
+    )
+    custom_question = call_data.get("custom_question") or ""
+
+    # ── Build CSV in-memory ───────────────────────────────────────────────────
+    import csv
+    import io
+
+    csv_columns = [
+        "name", "mobile_number", "hr", "employer", "skills",
+        "days", "work_location", "remote_work", "contract_hiring",
+        "custom_question", "candidate_id", "context"
+    ]
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=csv_columns)
+    writer.writeheader()
+
+    for c in candidates:
+        context = get_previous_call_context(c.get("candidate_id")) or " "
+        writer.writerow({
+            "name": c.get("name", ""),
+            "mobile_number": f"+91{c.get('phone', '')}",
+            "hr": call_data.get("hc_name", ""),
+            "employer": call_data.get("rc_name", ""),
+            "skills": call_data.get("key_skills", ""),
+            "days": call_data.get("notice_period", ""),
+            "work_location": call_data.get("company_location", ""),
+            "remote_work": remotew,
+            "contract_hiring": contracth,
+            "custom_question": custom_question,
+            "candidate_id": str(c.get("candidate_id", "")),
+            "context": context,
+        })
+
+    csv_content = output.getvalue()
+    output.close()
+
+    # ── Upload contact list to Ringg ──────────────────────────────────────────
+    variables_map = {col: col for col in csv_columns}
+
+    call_config = {
+        "max_concurrent_calls": max_concurrent_calls,
+        "retry_count": 1,
+        "retry_busy": 30,
+        "retry_not_picked": 30,
+        "retry_failed": 30,
+        "call_time": {
+            "call_start_time": "00:00",
+            "call_end_time": "23:59",
+            "timezone": "Asia/Kolkata"
+        }
+    }
+
+    try:
+        csv_bytes = csv_content.encode("utf-8")
+        upload_resp = requests.post(
+            f"{RINGG_BASE_URL}/calling/contact/list",
+            headers={"X-API-KEY": RINGG_API_KEY},
+            files={
+                "file": ("candidates.csv", csv_bytes, "text/csv"),
+            },
+            data={
+                "variables_map": json.dumps(variables_map),
+                "agent_id": RINGG_AGENT_ID,
+                "call_config": json.dumps(call_config),
+                "country_code": "+91",
+            },
+            timeout=30
+        )
+
+        if upload_resp.status_code != 200:
+            print(f"Ringg contact list upload error: {upload_resp.text}")
+            return jsonify({"error": f"Failed to upload contact list to Ringg: {upload_resp.text}"}), 502
+
+        upload_data = upload_resp.json()
+        bulk_list_id = upload_data.get("list_id") or upload_data.get("data", {}).get("list_id")
+
+        if not bulk_list_id:
+            print(f"Ringg upload response missing list_id: {upload_data}")
+            return jsonify({"error": "Ringg did not return a list_id", "ringg_response": upload_data}), 502
+
+        print(f"✅ Ringg contact list uploaded. bulk_list_id={bulk_list_id}")
+
+    except Exception as e:
+        print(f"Error uploading contact list to Ringg: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({"error": f"Contact list upload failed: {str(e)}"}), 500
+
+    # ── Initiate the bulk call campaign ───────────────────────────────────────
+    try:
+        bulk_resp = requests.post(
+            f"{RINGG_BASE_URL}/calling/outbound/bulk",
+            headers={
+                "X-API-KEY": RINGG_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={
+                "agent_id": RINGG_AGENT_ID,
+                "list_id": bulk_list_id,
+                "from_numbers": [RINGG_NUMBER_ID],
+            },
+            timeout=30
+        )
+
+        if bulk_resp.status_code != 200:
+            print(f"Ringg bulk initiate error: {bulk_resp.text}")
+            return jsonify({"error": f"Failed to initiate bulk call: {bulk_resp.text}"}), 502
+
+        print(f"✅ Ringg bulk call initiated. list_id={bulk_list_id}, candidates={len(candidates)}")
+
+    except Exception as e:
+        print(f"Error initiating Ringg bulk call: {e}")
+        return jsonify({"error": f"Bulk call initiation failed: {str(e)}"}), 500
+
+    return jsonify({
+        "success": True,
+        "bulk_list_id": bulk_list_id,
+        "total": len(candidates),
+        "message": f"Bulk call initiated for {len(candidates)} candidates with max_concurrent_calls={max_concurrent_calls}"
+    }), 200
+
+
+@app.route("/api/bulk-call-status", methods=["GET"])
+@jwt_required
+def bulk_call_status():
+    """
+    Polls Ringg's call history for a given bulk_list_id and returns
+    aggregated progress counts for the frontend.
+    """
+    bulk_list_id = request.args.get("bulk_list_id")
+    if not bulk_list_id:
+        return jsonify({"error": "bulk_list_id is required"}), 400
+
+    try:
+        resp = requests.get(
+            f"{RINGG_BASE_URL}/calling/history",
+            headers={"X-API-KEY": RINGG_API_KEY},
+            params={"bulk_list_id": bulk_list_id},
+            timeout=20
+        )
+
+        if resp.status_code != 200:
+            print(f"Ringg history error: {resp.text}")
+            return jsonify({"error": f"Ringg API error: {resp.text}"}), 502
+
+        history_data = resp.json()
+
+        # Ringg may return a list or a wrapped object — handle both
+        calls = history_data if isinstance(history_data, list) else history_data.get("data", history_data.get("calls", []))
+
+        # Tally statuses
+        completed = 0
+        in_progress = 0
+        pending = 0
+        failed = 0
+
+        for call in calls:
+            status = (call.get("status") or "").lower()
+            if status in ("completed", "answered", "called & answered"):
+                completed += 1
+            elif status in ("in_progress", "in-progress", "calling", "ringing"):
+                in_progress += 1
+            elif status in ("failed", "not_answered", "busy", "no_answer"):
+                failed += 1
+            else:
+                # pending / queued / unknown
+                pending += 1
+
+        total = len(calls)
+        done = (pending == 0 and in_progress == 0 and total > 0)
+
+        return jsonify({
+            "bulk_list_id": bulk_list_id,
+            "total": total,
+            "completed": completed,
+            "in_progress": in_progress,
+            "pending": pending,
+            "failed": failed,
+            "done": done,
+        }), 200
+
+    except Exception as e:
+        print(f"Error fetching bulk call status: {e}")
+        return jsonify({"error": f"Failed to fetch status: {str(e)}"}), 500
+
+
+@app.route("/api/bulk-call-cancel", methods=["POST"])
+@jwt_required
+def bulk_call_cancel():
+    """
+    Terminates an active bulk call campaign via Ringg's terminate endpoint.
+    """
+    try:
+        resp = requests.patch(
+            f"{RINGG_BASE_URL}/calling/terminate",
+            headers={
+                "X-API-KEY": RINGG_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"agent_id": RINGG_AGENT_ID},
+            timeout=20
+        )
+
+        if resp.status_code != 200:
+            print(f"Ringg terminate error: {resp.text}")
+            return jsonify({"error": f"Ringg terminate failed: {resp.text}"}), 502
+
+        print("✅ Ringg bulk call terminated.")
+        return jsonify({"success": True, "message": "Bulk call campaign terminated"}), 200
+
+    except Exception as e:
+        print(f"Error terminating bulk call: {e}")
+        return jsonify({"error": f"Terminate failed: {str(e)}"}), 500
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 def add_call_data(transcript, summary, structuredData, call_status, success_eval, 
                   phone, durationMinutes, name, candidate_id,org_id, reschedule_time=None, 
