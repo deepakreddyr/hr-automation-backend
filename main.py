@@ -1023,10 +1023,13 @@ def process_candidates(search_id):
         candidate_data = evaluate_candidates_bulk(all_resumes, jd, skills)
         print(f"AI returned {len(candidate_data) if isinstance(candidate_data, list) else 0} candidates")
         
-        if not candidate_data or not isinstance(candidate_data, list):
-            print("No valid candidate data received from AI")
-            supabase.table("search").update({"status": "error", "processed": True}).eq("id", search_id).execute()
-            return jsonify(success=False, error="Failed to process candidates"), 500
+        if candidate_data == [] or not isinstance(candidate_data, list):
+            print("No valid candidate data received from AI or no candidates matched")
+            status = "no_candidates" if candidate_data == [] else "error"
+            supabase.table("search").update({"status": status, "processed": True}).eq("id", search_id).execute()
+            
+            error_msg = "No candidates matched the criteria" if candidate_data == [] else "Failed to process candidates"
+            return jsonify(success=False, error=error_msg), 400 if candidate_data == [] else 500
         
         # Remove duplicates and process candidates
         unique_candidates = []
