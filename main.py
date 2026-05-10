@@ -260,6 +260,7 @@ def login():
             "email": email,
             "password": password
         })
+        print(auth_response)
         # Check if authentication failed
         if not auth_response or not auth_response.user:
             return jsonify({"success": False, "message": "Invalid email or password"}), 401

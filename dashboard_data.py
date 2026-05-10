@@ -41,6 +41,29 @@ def get_user_name(user_id):
     )
     return response.data.get("name", "") if response.data else ""
 
+def get_org_credits(org_id):
+    """Returns (current_creds, total_creds) for an organization"""
+    try:
+        # Get current creds from organization
+        org_res = supabase.table("organisation").select("creds, plan_id").eq("id", org_id).single().execute()
+        if not org_res.data:
+            return 0, 0
+            
+        current_creds = org_res.data.get("creds", 0)
+        plan_id = org_res.data.get("plan_id")
+        
+        # Get total/start creds from plan
+        total_creds = 0
+        if plan_id:
+            plan_res = supabase.table("plan").select("start_creds").eq("id", plan_id).single().execute()
+            if plan_res.data:
+                total_creds = plan_res.data.get("start_creds", 0)
+        
+        return current_creds, total_creds
+    except Exception as e:
+        print(f"Error fetching org credits: {e}")
+        return 0, 0
+
 from datetime import date, timedelta
 
 today = date.today()
@@ -141,6 +164,9 @@ def get_dashboard_data(org_id):
             }
         )
 
+    # Fetch org credits
+    current_creds, total_creds = get_org_credits(org_id)
+
     # Flatten "today" stats into root level for frontend compatibility
     return {
         "todays_searches": searches_count,
@@ -148,4 +174,6 @@ def get_dashboard_data(org_id):
         "people_called": calls_count,
         "new_joinees": joinees_count,
         "weekly_activity": weekly_activity,
+        "creds_total": total_creds,
+        "creds_remaining": current_creds
     }
