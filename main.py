@@ -520,14 +520,22 @@ def shortlist():
             
             # Get existing data
             existing_data = existing_search.data[0]
-            existing_shortlist = existing_data.get("shortlisted_index", "[]")
-            existing_process_state = existing_data.get("process_state", "{}")
+            # Parse existing data with safety checks
+            if not existing_shortlist:
+                existing_shortlist = []
+            elif isinstance(existing_shortlist, str):
+                try:
+                    existing_shortlist = json.loads(existing_shortlist)
+                except:
+                    existing_shortlist = []
             
-            # Parse existing data
-            if isinstance(existing_shortlist, str):
-                existing_shortlist = json.loads(existing_shortlist)
-            if isinstance(existing_process_state, str):
-                existing_process_state = json.loads(existing_process_state)
+            if not existing_process_state:
+                existing_process_state = {}
+            elif isinstance(existing_process_state, str):
+                try:
+                    existing_process_state = json.loads(existing_process_state)
+                except:
+                    existing_process_state = {}
             
             # Get existing resume_dict (already submitted resumes)
             existing_resume_dict = existing_process_state.get("resume_dict", {})
@@ -535,10 +543,12 @@ def shortlist():
             # Merge old and new candidates
             # Keep old candidates that have resumes submitted
             old_candidates_with_resumes = []
-            for candidate in existing_shortlist:
-                candidate_key = f"candidate_{candidate['index']}"
-                if candidate_key in existing_resume_dict:
-                    old_candidates_with_resumes.append(candidate)
+            if isinstance(existing_shortlist, list):
+                for candidate in existing_shortlist:
+                    if isinstance(candidate, dict) and 'index' in candidate:
+                        candidate_key = f"candidate_{candidate['index']}"
+                        if candidate_key in existing_resume_dict:
+                            old_candidates_with_resumes.append(candidate)
             
             # Find the maximum index from old candidates to avoid conflicts
             max_old_index = -1
@@ -550,6 +560,8 @@ def shortlist():
             new_resume_mapping = {}  # Map old index to new index for updating resume_dict
             
             for idx, new_candidate in enumerate(corrected_shortlist):
+                if not isinstance(new_candidate, dict) or 'index' not in new_candidate:
+                    continue
                 old_index = new_candidate['index']
                 new_index = max_old_index + 1 + idx
                 
@@ -616,9 +628,11 @@ def shortlist():
         
     except Exception as e:
         print(f"Error in shortlist operation: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "success": False,
-            "error": "An error occurred while processing your request."
+            "error": f"Failed to process shortlist: {str(e)}"
         }), 500
     
 @app.route("/api/shortlist/simple", methods=["POST"])
